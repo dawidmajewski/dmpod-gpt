@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import (  # noqa: E402
+    atomic_json,
+    execute_configs,
+    export_wandb_key,
+    file_sha256,
+    load_environment_config,
+    load_json,
+    nanogpt_root,
+    require_name,
+    tree_sha256,
+    validate_dataset,
+)
+from import_hf import import_hf_checkpoint  # noqa: E402
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Launch a saved DMPod training run.")
+    parser.add_argument("name")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true")
+    mode.add_argument("--restart", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    require_name(args.name, "run name")
+    environment = load_environment_config()
+    run_dir = Path(environment["runs_root"]) / args.name
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Unknown training run: {run_dir}")
+    lock = (run_dir / ".train.lock").open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise RuntimeError(f"Training run is already active: {args.name}") from error
+    manifest = load_json(manifest_path)
+    model_config = run_dir / "model.py"
+    training_config = run_dir / "training.py"
+    runtime_config = run_dir / "runtime.py"
+    checkpoint = run_dir / "checkpoints" / "ckpt.pt"
+    state_path = run_dir / "state.json"
+    previous_state = load_json(state_path) if state_path.is_file() else None
+    source = manifest["source"]
+    for config_name, config_info in manifest["configs"].items():
+        path = run_dir / config_info["path"]
+        if file_sha256(path) != config_info["sha256"]:
+            raise RuntimeError(
+                f"Run config changed after creation: {config_name} ({path}). "
+                "Create a new run for different settings."
+            )
+    effective = execute_configs([model_config, training_config, runtime_config])
+    validate_dataset(
+        nanogpt_root() / "data" / manifest["dataset"],
+        block_size=int(manifest["architecture"]["block_size"]),
+    )
+
+    needs_initialization = False
+    if args.resume:
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Cannot resume without {checkpoint}")
+        init_from = "resume"
+    elif args.restart:
+        if previous_state is None:
+            raise RuntimeError("Run has not started; --restart is unnecessary")
+        if source["type"] != "scratch" or checkpoint.exists():
+            raise RuntimeError(
+                "--restart is only for scratch runs that failed before creating a "
+                "checkpoint; use --resume otherwise"
+            )
+        init_from = "scratch"
+    elif previous_state is not None:
+        raise RuntimeError(
+            f"Run {args.name} has already started; use --resume to continue explicitly"
+        )
+    elif source["type"] == "scratch":
+        if any((run_dir / "checkpoints").iterdir()):
+            raise RuntimeError("Scratch run checkpoint directory is not empty")
+        init_from = "scratch"
+    else:
+        init_from = "resume"
+        needs_initialization = not checkpoint.is_file()
+
+    if needs_initialization and source["type"] == "checkpoint":
+        source_checkpoint = Path(source["checkpoint"])
+        if file_sha256(source_checkpoint) != source["checkpoint_sha256"]:
+            raise RuntimeError("Source checkpoint changed after run creation")
+    elif needs_initialization and source.get("local"):
+        if tree_sha256(Path(source["model_id"])) != source["content_sha256"]:
+            raise RuntimeError("Local Hugging Face model changed after run creation")
+
+    configured_gpu_count = os.environ.get("DMPOD_GPU_COUNT")
+    if configured_gpu_count is not None:
+        gpu_count = int(configured_gpu_count)
+    else:
+        import torch
+
+        gpu_count = torch.cuda.device_count()
+    if gpu_count < 1:
+        raise RuntimeError("No CUDA GPUs are visible")
+    accumulation = effective.get("gradient_accumulation_steps", 40)
+    if type(accumulation) is not int or accumulation < 1:
+        raise ValueError("gradient_accumulation_steps must be a positive integer")
+    if accumulation % gpu_count:
+        raise ValueError(
+            f"gradient_accumulation_steps={accumulation} is not divisible by "
+            f"{gpu_count} visible GPUs"
+        )
+
+    wandb = environment["wandb"]
+    os.environ["WANDB_MODE"] = wandb["mode"]
+    if wandb.get("entity"):
+        os.environ["WANDB_ENTITY"] = wandb["entity"]
+    if wandb["enabled"] and wandb["mode"] == "online":
+        key_source = export_wandb_key(wandb.get("key_source", "none"))
+        if key_source == "none":
+            raise RuntimeError(
+                "W&B is online but no key is available; rerun dmpod-setup or "
+                "set WANDB_API_KEY"
+            )
+
+    config_arguments = [
+        str(model_config),
+        str(training_config),
+        str(runtime_config),
+        f"--init_from={init_from}",
+    ]
+    if gpu_count == 1:
+        command = [sys.executable, "train.py", *config_arguments]
+    else:
+        command = [
+            "torchrun",
+            "--standalone",
+            f"--nproc_per_node={gpu_count}",
+            "train.py",
+            *config_arguments,
+        ]
+    print("Training command:", " ".join(command))
+    if args.dry_run:
+        return
+
+    if needs_initialization and source["type"] == "checkpoint":
+        temporary = checkpoint.with_name(f".{checkpoint.name}.tmp.{os.getpid()}")
+        try:
+            shutil.copy2(Path(source["checkpoint"]), temporary)
+            os.replace(temporary, checkpoint)
+        finally:
+            temporary.unlink(missing_ok=True)
+    elif needs_initialization:
+        import_hf_checkpoint(
+            nanogpt_root=nanogpt_root(),
+            model_id=source["model_id"],
+            revision=source.get("revision"),
+            output=checkpoint,
+            model_config=execute_configs([model_config]),
+            training_config=effective,
+            dataset=manifest["dataset"],
+            cache_dir=Path(environment["hf_cache"]),
+        )
+
+    attempts = int(previous_state.get("attempts", 0)) + 1 if previous_state else 1
+    state = {
+        "version": 1,
+        "status": "running",
+        "attempts": attempts,
+        "started_at": now(),
+        "init_from": init_from,
+        "gpu_count": gpu_count,
+    }
+    atomic_json(state_path, state)
+    try:
+        result = subprocess.run(command, cwd=nanogpt_root(), check=False)
+    except BaseException as error:
+        state.update(
+            status="failed",
+            finished_at=now(),
+            error=type(error).__name__,
+        )
+        atomic_json(state_path, state)
+        raise
+    state.update(
+        status="completed" if result.returncode == 0 else "failed",
+        finished_at=now(),
+        exit_code=result.returncode,
+    )
+    atomic_json(state_path, state)
+    raise SystemExit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()

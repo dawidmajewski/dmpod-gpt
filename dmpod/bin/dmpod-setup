@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import getpass
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import (  # noqa: E402
+    atomic_write,
+    config_path,
+    load_environment_config,
+    nanogpt_root,
+    state_root,
+    workspace_root,
+    write_environment_config,
+)
+
+
+def confirm(prompt: str, default: bool = False) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    answer = input(prompt + suffix).strip().lower()
+    if not answer:
+        return default
+    return answer in {"y", "yes"}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Configure DMPod storage, caches, and optional W&B access."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--skip-wandb", action="store_true")
+    group.add_argument("--wandb-from-env", action="store_true")
+    parser.add_argument("--save-wandb-key", action="store_true")
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"))
+    parser.add_argument("--non-interactive", action="store_true")
+    args = parser.parse_args()
+
+    existing = load_environment_config(required=False)
+    existing_wandb = existing.get("wandb", {})
+    root = workspace_root()
+    paths = {
+        "datasets_root": root / "datasets",
+        "models_root": root / "models",
+        "runs_root": root / "runs",
+        "hf_cache": root / "cache" / "huggingface",
+    }
+    for path in (*paths.values(), root / "logs" / "wandb", state_root() / "secrets"):
+        path.mkdir(parents=True, exist_ok=True)
+
+    project = args.wandb_project or existing_wandb.get("project", "dmpod-gpt")
+    entity = args.wandb_entity
+    if entity is None:
+        entity = existing_wandb.get("entity", "")
+    mode = args.wandb_mode or existing_wandb.get("mode", "online")
+    key_source = "none"
+    enabled = not args.skip_wandb and mode != "disabled"
+    provided_key = ""
+
+    if args.skip_wandb:
+        mode = "disabled"
+    elif args.wandb_from_env:
+        if not os.environ.get("WANDB_API_KEY"):
+            raise SystemExit("WANDB_API_KEY is not set")
+        key_source = "environment"
+        if args.save_wandb_key:
+            provided_key = os.environ["WANDB_API_KEY"]
+    elif os.environ.get("WANDB_API_KEY"):
+        key_source = "environment"
+        if args.save_wandb_key:
+            provided_key = os.environ["WANDB_API_KEY"]
+    elif existing_wandb.get("key_source") in {"workspace", "ephemeral"}:
+        existing_key_source = existing_wandb["key_source"]
+        existing_key_path = {
+            "workspace": state_root() / "secrets" / "wandb.key",
+            "ephemeral": Path.home() / ".config" / "dmpod" / "wandb.key",
+        }[existing_key_source]
+        if existing_key_path.is_file():
+            key_source = existing_key_source
+        elif mode not in {"offline", "disabled"} and args.non_interactive:
+            raise SystemExit(f"Configured W&B key is missing: {existing_key_path}")
+    elif mode in {"offline", "disabled"}:
+        enabled = mode != "disabled"
+    elif args.non_interactive:
+        raise SystemExit(
+            "Use --wandb-from-env or --skip-wandb in non-interactive mode"
+        )
+    else:
+        enabled = confirm("Configure Weights & Biases?", default=True)
+        if enabled:
+            provided_key = getpass.getpass(
+                "WANDB_API_KEY (hidden, press Enter to use offline mode): "
+            ).strip()
+            if not provided_key:
+                mode = "offline"
+                key_source = "none"
+        else:
+            mode = "disabled"
+
+    if provided_key:
+        save_persistent = args.save_wandb_key
+        if not args.non_interactive and not args.save_wandb_key:
+            save_persistent = confirm(
+                "Save the key on /workspace for future Pods?", default=False
+            )
+        if save_persistent:
+            key_path = state_root() / "secrets" / "wandb.key"
+            key_source = "workspace"
+        else:
+            key_path = Path.home() / ".config" / "dmpod" / "wandb.key"
+            key_source = "ephemeral"
+        atomic_write(key_path, provided_key + "\n", mode=0o600)
+
+    config = {
+        "version": 1,
+        "workspace_root": str(root),
+        "nanogpt_root": str(nanogpt_root()),
+        **{name: str(path) for name, path in paths.items()},
+        "wandb": {
+            "enabled": enabled and mode != "disabled",
+            "mode": mode,
+            "project": project,
+            "entity": entity,
+            "key_source": key_source,
+        },
+    }
+    write_environment_config(config)
+    print(f"DMPod environment configured: {config_path()}")
+    print(f"nanoGPT workspace: {nanogpt_root()}")
+    print(f"W&B mode: {mode}; key source: {key_source}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import json
+import sys
+import time
+from pathlib import Path
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import (  # noqa: E402
+    execute_configs,
+    load_environment_config,
+    nanogpt_root,
+    validate_model_config,
+)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Benchmark a nanoGPT model config.")
+    parser.add_argument("--model-config", required=True, type=Path)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--block-size", type=int)
+    parser.add_argument("--warmup-steps", type=int, default=10)
+    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if min(args.batch_size, args.warmup_steps, args.steps) < 1:
+        raise ValueError("batch size and step counts must be positive")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    if args.dtype == "bfloat16" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("The selected GPU does not support bfloat16")
+
+    environment = load_environment_config()
+    model_path = args.model_config.expanduser().resolve()
+    values = execute_configs([model_path])
+    validate_model_config(values)
+    block_size = args.block_size if args.block_size is not None else int(values["block_size"])
+    if block_size < 1:
+        raise ValueError("Benchmark block size must be positive")
+    if block_size > int(values["block_size"]):
+        raise ValueError("Benchmark block size exceeds the model block size")
+
+    sys.path.insert(0, str(nanogpt_root()))
+    from model import GPT, GPTConfig
+
+    config = GPTConfig(
+        block_size=int(values["block_size"]),
+        vocab_size=int(values.get("vocab_size", 50304)),
+        n_layer=int(values["n_layer"]),
+        n_head=int(values["n_head"]),
+        n_embd=int(values["n_embd"]),
+        dropout=float(values.get("dropout", 0.0)),
+        bias=bool(values["bias"]),
+    )
+    model = GPT(config).cuda().train()
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    optimizer = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), "cuda")
+    if args.compile:
+        model = torch.compile(model)
+    ptdtype = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[args.dtype]
+    scaler = torch.amp.GradScaler("cuda", enabled=ptdtype == torch.float16)
+    def autocast():
+        if ptdtype == torch.float32:
+            return contextlib.nullcontext()
+        return torch.amp.autocast("cuda", dtype=ptdtype)
+    x = torch.randint(config.vocab_size, (args.batch_size, block_size), device="cuda")
+    y = torch.randint(config.vocab_size, (args.batch_size, block_size), device="cuda")
+
+    def step() -> torch.Tensor:
+        optimizer.zero_grad(set_to_none=True)
+        with autocast():
+            _, loss = model(x, y)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        return loss.detach()
+
+    for _ in range(args.warmup_steps):
+        step()
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    started = time.perf_counter()
+    loss = torch.zeros((), device="cuda")
+    for _ in range(args.steps):
+        loss = step()
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started
+    last_loss = float(loss)
+    tokens = args.steps * args.batch_size * block_size
+    result = {
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "model_config": str(model_path),
+        "gpu": torch.cuda.get_device_name(0),
+        "visible_gpu_count": torch.cuda.device_count(),
+        "devices_used": 1,
+        "torch": torch.__version__,
+        "cuda_runtime": torch.version.cuda,
+        "dtype": args.dtype,
+        "compiled": args.compile,
+        "batch_size": args.batch_size,
+        "block_size": block_size,
+        "steps": args.steps,
+        "parameters": parameter_count,
+        "last_loss": last_loss,
+        "milliseconds_per_step": elapsed * 1000 / args.steps,
+        "tokens_per_second": tokens / elapsed,
+        "peak_memory_bytes": torch.cuda.max_memory_allocated(),
+    }
+    output = args.output or Path(environment["workspace_root"]) / "benchmarks" / "results.jsonl"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(result, sort_keys=True) + "\n")
+    print(json.dumps(result, indent=2, sort_keys=True))
+    print(f"Benchmark appended to {output}")
+
+
+if __name__ == "__main__":
+    main()
