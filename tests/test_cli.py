@@ -123,6 +123,10 @@ class Api:
         self.initialize_workspace()
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
 
+    def test_smoke_test_help_does_not_require_a_configured_workspace(self) -> None:
+        result = self.run_command(str(BIN / "dmpod-smoke-test"), "--help")
+        self.assertIn("TinyStories GPU and W&B smoke test", result.stdout)
+
     def test_setup_writes_environment_only_config_with_private_mode(self) -> None:
         self.initialize_workspace()
         self.setup_environment()

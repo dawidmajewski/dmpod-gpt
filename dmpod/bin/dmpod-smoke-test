@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -49,6 +50,11 @@ def run(*command: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run and verify the TinyStories GPU and W&B smoke test."
+    )
+    parser.parse_args()
+
     environment = load_environment_config()
     wandb_config = environment["wandb"]
     if wandb_config["mode"] != "online" or not wandb_config["enabled"]:
