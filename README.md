@@ -53,6 +53,8 @@ If a W&B key is entered interactively, setup can save it at
 `/workspace/.dmpod/secrets/wandb.key` with mode `0600`. Environment variable
 `WANDB_API_KEY` always takes precedence. The key is never written to TOML or a
 run manifest. Saving it on a Network Volume is explicit and optional.
+`dmpod-setup` also registers a verified online key with the standard W&B client,
+so `wandb` commands and agent tools use the same authenticated account.
 
 For reusable Pod credentials, create a RunPod secret named `wandb_api_key` and
 map it in the Pod template without putting the value in the template:

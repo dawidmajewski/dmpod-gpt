@@ -31,6 +31,7 @@ def verify_wandb_key(key: str) -> str:
     import wandb
 
     try:
+        wandb.login(key=key, verify=True)
         api = wandb.Api(api_key=key, timeout=30)
         api.viewer
         entity = api.default_entity

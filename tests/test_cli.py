@@ -97,6 +97,16 @@ class DMPodCliTests(unittest.TestCase):
         (modules / "wandb.py").write_text(
             """\
 import os
+from pathlib import Path
+
+
+def login(key, verify):
+    if not verify or key != os.environ["DMPOD_TEST_WANDB_CREDENTIAL"]:
+        raise RuntimeError("rejected test credential")
+    netrc = Path.home() / ".netrc"
+    netrc.write_text("test W&B credentials configured\\n", encoding="utf-8")
+    netrc.chmod(0o600)
+    return True
 
 
 class Api:
@@ -158,6 +168,9 @@ class Api:
         self.assertNotIn(credential, config)
         self.assertNotIn(credential, result.stdout)
         self.assertNotIn(credential, result.stderr)
+        netrc = self.home / ".netrc"
+        self.assertTrue(netrc.is_file())
+        self.assertEqual(stat.S_IMODE(netrc.stat().st_mode), 0o600)
 
         reused = self.run_command(
             str(BIN / "dmpod-setup"),
@@ -182,6 +195,7 @@ class Api:
             (self.workspace / ".dmpod" / "secrets" / "wandb.key").exists()
         )
         self.assertFalse((self.workspace / ".dmpod" / "config.toml").exists())
+        self.assertFalse((self.home / ".netrc").exists())
 
     def test_setup_keeps_interactive_credential_ephemeral_by_default(self) -> None:
         self.initialize_workspace()
