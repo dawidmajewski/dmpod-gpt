@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from string import Template
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import atomic_json, atomic_write, load_environment_config, require_name  # noqa: E402
+
+
+def load(path: Path, required: bool = True) -> Any:
+    if not path.is_file():
+        if required:
+            raise FileNotFoundError(path)
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def table(rows: list[tuple[str, Any]]) -> str:
+    lines = ["| Field | Value |", "| --- | --- |"]
+    for key, value in rows:
+        rendered = "" if value is None else str(value)
+        rendered = rendered.replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {key} | {rendered} |")
+    return "\n".join(lines)
+
+
+def checkpoint_table(artifacts: dict[str, Any] | None) -> str:
+    if not artifacts or not artifacts.get("checkpoints"):
+        return "No checkpoint records are available."
+    lines = ["| Aliases | File | SHA-256 |", "| --- | --- | --- |"]
+    for record in artifacts["checkpoints"]:
+        lines.append(
+            f"| {', '.join(record['aliases'])} | `{record['path']}` | "
+            f"`{record['sha256']}` |"
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export a trained run as Markdown.")
+    parser.add_argument("name")
+    parser.add_argument(
+        "--format", choices=("all", "readme", "pr"), default="all"
+    )
+    parser.add_argument("--output-dir", type=Path)
+    args = parser.parse_args()
+    require_name(args.name, "run name")
+    environment = load_environment_config()
+    run_dir = Path(environment["runs_root"]) / args.name
+    manifest = load(run_dir / "manifest.json")
+    if manifest.get("version") != 2:
+        raise ValueError("Markdown export requires a version 2 run")
+    config = load(run_dir / "resolved-config.json")
+    summary = load(run_dir / "summary.json")
+    runtime = load(run_dir / "runtime.json")
+    artifacts = load(run_dir / "artifacts.json", required=False)
+    wandb = load(run_dir / "wandb.json", required=False)
+    output_dir = (args.output_dir or run_dir / "reports").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    template_root = Path(__file__).resolve().parents[1] / "templates"
+    results = table(
+        [
+            ("Final validation loss", summary["final_val_loss"]),
+            ("Minimum validation loss", summary["min_val_loss"]),
+            ("Tokens at minimum", summary["tokens_at_min_val_loss"]),
+            ("Final train-eval loss", summary["final_train_eval_loss"]),
+            ("Final perplexity", summary["final_val_perplexity"]),
+            ("Tokens seen", summary["final_tokens_seen"]),
+            ("Data passes", summary["final_data_pass_equivalent"]),
+            ("Mean tokens/s", summary["mean_tokens_per_sec"]),
+            ("Wall time hours", summary["wall_time_hours"]),
+        ]
+    )
+    model = config["model"]
+    model_values = table(
+        [
+            ("Layers", model["n_layer"]),
+            ("Heads", model["n_head"]),
+            ("Embedding width", model["n_embd"]),
+            ("Context length", model["block_size"]),
+            ("Vocabulary", model["vocab_size"]),
+            ("Weight tying", model["weight_tying"]),
+            ("Total parameters", model["actual_parameters_total"]),
+            ("Trainable parameters", model["actual_parameters_trainable"]),
+            ("Non-embedding parameters", model["actual_parameters_non_embedding"]),
+        ]
+    )
+    optimizer = config["optimizer"]
+    batch = config["batch"]
+    training = table(
+        [
+            ("Maximum LR", optimizer["max_lr"]),
+            ("Minimum LR", optimizer["min_lr"]),
+            ("Warmup ratio", optimizer["warmup_ratio"]),
+            ("Weight decay", optimizer["weight_decay"]),
+            ("Effective batch tokens", batch["effective_batch_tokens"]),
+            ("Target updates", batch["target_update_steps"]),
+            ("Seed", config["runtime"]["seed"]),
+            ("Precision", config["runtime"]["precision"]),
+            ("GPU", ", ".join(runtime["gpu_model"])),
+            ("GPU count", runtime["gpu_count"]),
+        ]
+    )
+    dataset = config["dataset"]
+    data_values = table(
+        [
+            ("Dataset", dataset["name"]),
+            ("Revision", dataset["revision"]),
+            ("License", dataset["license"]),
+            ("Train SHA-256", dataset["files"]["train"]["sha256"]),
+            ("Validation SHA-256", dataset["files"]["val"]["sha256"]),
+            ("Tokenizer", dataset["tokenizer"]["name"]),
+            ("Tokenizer version", dataset["tokenizer"]["version"]),
+            ("Tokenizer SHA-256", dataset["tokenizer"]["sha256"]),
+            ("Split", dataset["split_method"]),
+            ("Deduplication", dataset["deduplication_method"]),
+        ]
+    )
+    provenance = table(
+        [
+            ("Git commit", manifest["git"]["commit"]),
+            ("Git dirty", manifest["git"]["dirty"]),
+            ("PyTorch", runtime["pytorch_version"]),
+            ("CUDA", runtime["cuda_version"]),
+            ("W&B", runtime["wandb_version"]),
+            ("W&B run", wandb["url"] if wandb else "offline"),
+        ]
+    )
+    checkpoints = checkpoint_table(artifacts)
+    reproduce = f"dmpod-train {args.name} --resume --tmux"
+    context = {
+        "schema_version": 1,
+        "run": config,
+        "summary": summary,
+        "runtime": runtime,
+        "manifest": manifest,
+        "artifacts": artifacts,
+        "wandb": wandb,
+    }
+    atomic_json(output_dir / "report-context.json", context)
+    if args.format in {"all", "readme"}:
+        source = Template(
+            (template_root / "model-readme.md").read_text(encoding="utf-8")
+        )
+        atomic_write(
+            output_dir / "README.md",
+            source.substitute(
+                model_name=args.name,
+                results_table=results,
+                model_table=model_values,
+                training_table=training,
+                data_table=data_values,
+                checkpoint_table=checkpoints,
+                reproduce_command=reproduce,
+                provenance_table=provenance,
+            )
+            + "\n",
+        )
+    if args.format in {"all", "pr"}:
+        source = Template(
+            (template_root / "trained-model-pr.md").read_text(encoding="utf-8")
+        )
+        checklist = "\n".join(
+            [
+                f"- [{'x' if summary['completed_target_budget'] else ' '}] Target token budget completed",
+                "- [x] Dataset and tokenizer hashes verified",
+                "- [x] Immutable training configuration saved",
+                "- [x] Final evaluation completed",
+                "- [x] Final checkpoint recorded",
+            ]
+        )
+        link = f"[{wandb['url']}]({wandb['url']})" if wandb and wandb.get("url") else "offline"
+        atomic_write(
+            output_dir / "PR_BODY.md",
+            source.substitute(
+                summary=f"Adds the trained checkpoint for `{args.name}`.",
+                results_table=results,
+                reproducibility_checklist=checklist,
+                checkpoint_table=checkpoints,
+                stop_reason=summary["stop_reason"],
+                completed_target_budget=str(summary["completed_target_budget"]).lower(),
+                wandb_link=link,
+                manifest_path=str(run_dir / "manifest.json"),
+            )
+            + "\n",
+        )
+    print(f"Run reports written to {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

@@ -27,6 +27,23 @@ def confirm(prompt: str, default: bool = False) -> bool:
     return answer in {"y", "yes"}
 
 
+def verify_wandb_key(key: str) -> str:
+    import wandb
+
+    try:
+        api = wandb.Api(api_key=key, timeout=30)
+        api.viewer
+        entity = api.default_entity
+    except Exception as error:
+        raise SystemExit(
+            "W&B rejected the configured API key; create a current key at "
+            "https://wandb.ai/authorize and rerun dmpod-setup"
+        ) from error
+    if not entity:
+        raise SystemExit("W&B did not return a default entity for this account")
+    return str(entity)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Configure DMPod storage, caches, and optional W&B access."
@@ -61,6 +78,7 @@ def main() -> None:
     key_source = "none"
     enabled = not args.skip_wandb and mode != "disabled"
     provided_key = ""
+    key_path_to_write: Path | None = None
 
     if args.skip_wandb:
         mode = "disabled"
@@ -114,7 +132,30 @@ def main() -> None:
         else:
             key_path = Path.home() / ".config" / "dmpod" / "wandb.key"
             key_source = "ephemeral"
-        atomic_write(key_path, provided_key + "\n", mode=0o600)
+        key_path_to_write = key_path
+
+    if enabled and mode == "online":
+        if provided_key:
+            key_to_verify = provided_key
+        elif os.environ.get("WANDB_API_KEY"):
+            key_to_verify = os.environ["WANDB_API_KEY"]
+        else:
+            existing_key_path = {
+                "workspace": state_root() / "secrets" / "wandb.key",
+                "ephemeral": Path.home() / ".config" / "dmpod" / "wandb.key",
+            }.get(key_source)
+            key_to_verify = (
+                existing_key_path.read_text(encoding="utf-8").strip()
+                if existing_key_path and existing_key_path.is_file()
+                else ""
+            )
+        if not key_to_verify:
+            raise SystemExit("W&B online mode requires a non-empty API key")
+        default_entity = verify_wandb_key(key_to_verify)
+        if not entity:
+            entity = default_entity
+    if key_path_to_write is not None:
+        atomic_write(key_path_to_write, provided_key + "\n", mode=0o600)
 
     config = {
         "version": 1,

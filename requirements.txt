@@ -8,4 +8,5 @@ tiktoken==0.14.0
 tokenizers==0.22.2
 tqdm==4.70.0
 transformers==5.15.1
-wandb==0.22.3
+wandb==0.28.2
+wandb-workspaces==0.4.8

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-
 
 PROJECT = Path(__file__).resolve().parents[1]
 BIN = PROJECT / "dmpod" / "bin"
@@ -20,6 +21,8 @@ class DMPodCliTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.workspace = self.root / "workspace"
+        self.home = self.root / "home"
+        self.home.mkdir()
         self.image_nanogpt = self.root / "image-nanogpt"
         self.image_nanogpt.mkdir()
         (self.image_nanogpt / "train.py").write_text("# test\n", encoding="utf-8")
@@ -29,6 +32,7 @@ class DMPodCliTests(unittest.TestCase):
             "ref: refs/heads/test\n", encoding="utf-8"
         )
         self.env = os.environ.copy()
+        self.env.pop("WANDB_API_KEY", None)
         self.env.update(
             DMPOD_WORKSPACE=str(self.workspace),
             DMPOD_NANOGPT_ROOT=str(self.workspace / "nanogpt"),
@@ -36,18 +40,24 @@ class DMPodCliTests(unittest.TestCase):
             DMPOD_TEMPLATE_ROOT=str(TEMPLATE),
             DMPOD_NANOGPT_PATCH="",
             DMPOD_GPU_COUNT="1",
+            DMPOD_TEST_GPU_NAME="Test GPU",
+            DMPOD_TEST_WANDB_VERSION="test",
+            HOME=str(self.home),
         )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_command(self, *command: str) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        self, *command: str, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             command,
             env=self.env,
             check=False,
             capture_output=True,
             text=True,
+            input=input_text,
         )
         self.assertEqual(
             result.returncode,
@@ -56,13 +66,16 @@ class DMPodCliTests(unittest.TestCase):
         )
         return result
 
-    def run_failure(self, *command: str) -> subprocess.CompletedProcess[str]:
+    def run_failure(
+        self, *command: str, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             command,
             env=self.env,
             check=False,
             capture_output=True,
             text=True,
+            input=input_text,
         )
         self.assertNotEqual(result.returncode, 0, "command unexpectedly succeeded")
         return result
@@ -76,6 +89,28 @@ class DMPodCliTests(unittest.TestCase):
             "--wandb-mode",
             "offline",
             "--non-interactive",
+        )
+
+    def install_fake_wandb(self, expected_credential: str) -> None:
+        modules = self.root / "test-modules"
+        modules.mkdir()
+        (modules / "wandb.py").write_text(
+            """\
+import os
+
+
+class Api:
+    def __init__(self, api_key, timeout):
+        if api_key != os.environ["DMPOD_TEST_WANDB_CREDENTIAL"]:
+            raise RuntimeError("rejected test credential")
+        self.viewer = {"username": "test-user"}
+        self.default_entity = "test-entity"
+""",
+            encoding="utf-8",
+        )
+        self.env["DMPOD_TEST_WANDB_CREDENTIAL"] = expected_credential
+        self.env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(modules), self.env.get("PYTHONPATH")))
         )
 
     def test_entrypoint_copies_git_and_does_not_overwrite_workspace(self) -> None:
@@ -98,6 +133,75 @@ class DMPodCliTests(unittest.TestCase):
         self.assertIn('mode = "offline"', content)
         self.assertNotIn("model_id", content)
         self.assertNotIn("learning_rate", content)
+
+    def test_setup_accepts_hidden_credential_and_reuses_workspace_copy(self) -> None:
+        self.initialize_workspace()
+        credential = secrets.token_hex(24)
+        self.install_fake_wandb(credential)
+
+        result = self.run_command(
+            str(BIN / "dmpod-setup"),
+            input_text=f"\n{credential}\ny\n",
+        )
+
+        key_path = self.workspace / ".dmpod" / "secrets" / "wandb.key"
+        config_path = self.workspace / ".dmpod" / "config.toml"
+        self.assertTrue(key_path.is_file())
+        self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+        config = config_path.read_text(encoding="utf-8")
+        self.assertIn('entity = "test-entity"', config)
+        self.assertIn('key_source = "workspace"', config)
+        self.assertNotIn(credential, config)
+        self.assertNotIn(credential, result.stdout)
+        self.assertNotIn(credential, result.stderr)
+
+        reused = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--non-interactive",
+        )
+        self.assertIn("key source: workspace", reused.stdout)
+
+    def test_setup_does_not_save_rejected_interactive_credential(self) -> None:
+        self.initialize_workspace()
+        self.install_fake_wandb(secrets.token_hex(24))
+        rejected_credential = secrets.token_hex(24)
+
+        result = self.run_failure(
+            str(BIN / "dmpod-setup"),
+            input_text=f"\n{rejected_credential}\ny\n",
+        )
+
+        self.assertIn("W&B rejected the configured API key", result.stderr)
+        self.assertNotIn(rejected_credential, result.stdout)
+        self.assertNotIn(rejected_credential, result.stderr)
+        self.assertFalse(
+            (self.workspace / ".dmpod" / "secrets" / "wandb.key").exists()
+        )
+        self.assertFalse((self.workspace / ".dmpod" / "config.toml").exists())
+
+    def test_setup_keeps_interactive_credential_ephemeral_by_default(self) -> None:
+        self.initialize_workspace()
+        credential = secrets.token_hex(24)
+        self.install_fake_wandb(credential)
+
+        result = self.run_command(
+            str(BIN / "dmpod-setup"),
+            input_text=f"\n{credential}\n\n",
+        )
+
+        key_path = self.home / ".config" / "dmpod" / "wandb.key"
+        self.assertTrue(key_path.is_file())
+        self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+        self.assertFalse(
+            (self.workspace / ".dmpod" / "secrets" / "wandb.key").exists()
+        )
+        config = (self.workspace / ".dmpod" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('key_source = "ephemeral"', config)
+        self.assertNotIn(credential, config)
+        self.assertNotIn(credential, result.stdout)
+        self.assertNotIn(credential, result.stderr)
 
     def test_registers_existing_dataset_without_copying(self) -> None:
         self.initialize_workspace()
@@ -122,7 +226,19 @@ class DMPodCliTests(unittest.TestCase):
         nanogpt = self.workspace / "nanogpt"
         subprocess.run(["git", "init", "-q", str(nanogpt)], check=True)
         subprocess.run(
-            ["git", "-C", str(nanogpt), "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "test"],
+            [
+                "git",
+                "-C",
+                str(nanogpt),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "test",
+            ],
             check=True,
         )
         dataset = nanogpt / "data" / "tiny"
@@ -156,9 +272,10 @@ class DMPodCliTests(unittest.TestCase):
         self.assertTrue((run / "model.py").is_file())
         self.assertTrue((run / "training.py").is_file())
         self.assertTrue((run / "runtime.py").is_file())
-        self.assertIn("Training command:", self.run_command(
-            str(BIN / "dmpod-train"), "test-run", "--dry-run"
-        ).stdout)
+        self.assertIn(
+            "Training command:",
+            self.run_command(str(BIN / "dmpod-train"), "test-run", "--dry-run").stdout,
+        )
 
         (run / "state.json").write_text(
             json.dumps({"version": 1, "status": "failed", "attempts": 1}),
@@ -175,6 +292,165 @@ class DMPodCliTests(unittest.TestCase):
             str(BIN / "dmpod-train"), "test-run", "--restart", "--dry-run"
         )
         self.assertIn("Run config changed after creation", changed.stderr)
+
+    def create_profile_dataset(self) -> Path:
+        dataset = self.workspace / "nanogpt" / "data" / "tinystories-smoke"
+        dataset.mkdir(parents=True)
+        train = dataset / "train.bin"
+        val = dataset / "val.bin"
+        tokenizer = dataset / "tokenizer.json"
+        train.write_bytes(bytes(2048))
+        val.write_bytes(bytes(1024))
+        tokenizer.write_text('{"encoding":"test"}\n', encoding="utf-8")
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest = {
+            "schema_version": 1,
+            "name": "tinystories-smoke",
+            "revision": "test-revision",
+            "license": "test-only",
+            "dtype": "uint16",
+            "files": {
+                "train": {
+                    "path": "train.bin",
+                    "sha256": digest(train),
+                    "tokens": 1024,
+                },
+                "val": {
+                    "path": "val.bin",
+                    "sha256": digest(val),
+                    "tokens": 512,
+                },
+            },
+            "tokenizer": {
+                "path": "tokenizer.json",
+                "sha256": digest(tokenizer),
+                "name": "test-tokenizer",
+                "version": "1",
+                "vocab_size": 50304,
+            },
+            "document_boundary_token_id": 0,
+            "padding_token_id": None,
+            "split_method": "fixed test split",
+            "deduplication_method": "none",
+        }
+        (dataset / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return dataset
+
+    def test_profile_run_snapshots_resolved_config_and_dataset_hashes(self) -> None:
+        self.initialize_workspace()
+        self.setup_environment()
+        nanogpt = self.workspace / "nanogpt"
+        subprocess.run(["git", "init", "-q", str(nanogpt)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(nanogpt),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "test",
+            ],
+            check=True,
+        )
+        dataset = self.create_profile_dataset()
+        result = self.run_command(
+            str(BIN / "dmpod-create-training"),
+            "--profile",
+            "smoke-tinystories",
+        )
+        name = "lr-0.001_seed-1337_btok-8192"
+        self.assertIn(name, result.stdout)
+        run = self.workspace / "runs" / name
+        manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+        resolved = json.loads(
+            (run / "resolved-config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(resolved["model"]["actual_parameters_total"], 16091392)
+        self.assertEqual(resolved["dataset"]["files"]["train"]["tokens"], 1024)
+        self.assertTrue((run / "sources" / "trainer.py").is_file())
+        self.assertTrue((run / "eval" / "train_offsets.npy").is_file())
+        dry_run = self.run_command(str(BIN / "dmpod-train"), name, "--dry-run")
+        self.assertIn("trainer.py", dry_run.stdout)
+
+        (run / "summary.json").write_text(
+            json.dumps(
+                {
+                    "final_val_loss": 4.0,
+                    "min_val_loss": 3.9,
+                    "tokens_at_min_val_loss": 8192,
+                    "final_train_eval_loss": 3.8,
+                    "final_val_perplexity": 54.6,
+                    "final_tokens_seen": 8192,
+                    "final_data_pass_equivalent": 8.0,
+                    "completed_target_budget": True,
+                    "optimizer_updates_completed": 1,
+                    "skipped_updates_total": 0,
+                    "wall_time_hours": 0.01,
+                    "mean_tokens_per_sec": 1000.0,
+                    "peak_gpu_memory_allocated_gb": 1.0,
+                    "peak_gpu_memory_reserved_gb": 1.2,
+                    "best_checkpoint_alias": "best-val",
+                    "final_checkpoint_alias": "final",
+                    "stop_reason": "completed",
+                    "exit_code": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run / "artifacts.json").write_text(
+            json.dumps({"version": 1, "checkpoints": []}), encoding="utf-8"
+        )
+        self.run_command(str(BIN / "dmpod-export-run"), name)
+        self.assertIn(
+            "Final validation loss",
+            (run / "reports" / "README.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "Target token budget completed",
+            (run / "reports" / "PR_BODY.md").read_text(encoding="utf-8"),
+        )
+
+        (dataset / "train.bin").write_bytes(b"\x01\x00" + bytes(2046))
+        changed = self.run_failure(str(BIN / "dmpod-train"), name, "--dry-run")
+        self.assertIn("SHA-256 mismatch", changed.stderr)
+
+    def test_profile_rejects_unresolved_dataset_manifest(self) -> None:
+        self.initialize_workspace()
+        self.setup_environment()
+        nanogpt = self.workspace / "nanogpt"
+        subprocess.run(["git", "init", "-q", str(nanogpt)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(nanogpt),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "test",
+            ],
+            check=True,
+        )
+        dataset = self.create_profile_dataset()
+        manifest = json.loads((dataset / "dataset.json").read_text(encoding="utf-8"))
+        manifest["revision"] = "REPLACE_WITH_REVISION"
+        (dataset / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+        failed = self.run_failure(
+            str(BIN / "dmpod-create-training"),
+            "--profile",
+            "smoke-tinystories",
+        )
+        self.assertIn("Unresolved placeholder", failed.stderr)
 
 
 if __name__ == "__main__":

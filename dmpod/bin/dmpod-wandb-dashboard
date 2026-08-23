@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import atomic_json, export_wandb_key, load_environment_config, state_root  # noqa: E402
+from dmpod_profile import load_profile  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Create the canonical W&B workspace.")
+    parser.add_argument("--profile", default="minimal-en-125m")
+    args = parser.parse_args()
+    environment = load_environment_config()
+    wandb = environment["wandb"]
+    if wandb["mode"] != "online" or not wandb["enabled"]:
+        raise RuntimeError("W&B dashboard creation requires online mode")
+    if export_wandb_key(wandb.get("key_source", "none")) == "none":
+        raise RuntimeError("W&B dashboard creation requires a configured API key")
+    if not wandb.get("entity"):
+        raise RuntimeError("Run dmpod-setup with --wandb-entity first")
+    os.environ["WANDB_ENTITY"] = wandb["entity"]
+    _, profile = load_profile(args.profile)
+    project = profile["wandb"]["project"]
+    import wandb_workspaces.reports.v2 as wr
+    import wandb_workspaces.workspaces as ws
+
+    state_path = state_root() / "wandb-workspaces.json"
+    state = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if state_path.is_file()
+        else {"version": 1, "projects": {}}
+    )
+    sections = [
+        ws.Section(
+            name="Loss And Learning Rate",
+            is_open=True,
+            panels=[
+                wr.LinePlot(title="Validation loss", x="progress/tokens_seen", y=["eval/val_loss"]),
+                wr.LinePlot(title="Train loss", x="progress/tokens_seen", y=["train/loss"]),
+                wr.LinePlot(title="Learning rate", x="progress/tokens_seen", y=["train/lr"]),
+            ],
+        ),
+        ws.Section(
+            name="Optimization",
+            is_open=True,
+            panels=[
+                wr.LinePlot(title="Gradient norms", x="progress/tokens_seen", y=["train/grad_norm", "train/grad_norm_max"]),
+                wr.LinePlot(title="Clip fraction", x="progress/tokens_seen", y=["train/clip_fraction"]),
+            ],
+        ),
+        ws.Section(
+            name="Performance",
+            is_open=True,
+            panels=[
+                wr.LinePlot(title="Tokens per second", x="progress/tokens_seen", y=["perf/tokens_per_sec"]),
+                wr.LinePlot(title="Step time", x="progress/tokens_seen", y=["perf/step_time_ms"]),
+            ],
+        ),
+    ]
+    key = f"{wandb['entity']}/{project}"
+    existing_url = state["projects"].get(key)
+    if existing_url:
+        workspace = ws.Workspace.from_url(existing_url)
+        workspace.sections = sections
+        workspace.save()
+    else:
+        workspace = ws.Workspace(
+            name="nanoGPT 125M LR Sweep",
+            entity=wandb["entity"],
+            project=project,
+            sections=sections,
+        )
+        workspace.save()
+        state["projects"][key] = workspace.url
+        atomic_json(state_path, state, mode=0o600)
+    print(f"W&B workspace ready: {workspace.url}")
+
+
+if __name__ == "__main__":
+    main()

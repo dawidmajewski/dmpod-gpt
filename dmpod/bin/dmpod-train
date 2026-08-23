@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import importlib.metadata
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,11 +26,189 @@ from dmpod_common import (  # noqa: E402
     tree_sha256,
     validate_dataset,
 )
+from dmpod_profile import validate_dataset_manifest  # noqa: E402
 from import_hf import import_hf_checkpoint  # noqa: E402
 
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def launch_tmux(args: argparse.Namespace, run_dir: Path) -> None:
+    session = f"dmpod-{args.name}"
+    if os.environ.get("TMUX"):
+        raise RuntimeError("Already inside tmux; omit --tmux")
+    existing = subprocess.run(
+        ["tmux", "has-session", "-t", session],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if existing.returncode == 0:
+        raise RuntimeError(f"tmux session already exists: {session}")
+    command = [str(Path(__file__).resolve()), args.name]
+    if args.resume:
+        command.append("--resume")
+    elif args.restart:
+        command.append("--restart")
+    if args.dry_run:
+        command.append("--dry-run")
+    log_path = run_dir / "logs" / "training.log"
+    shell_command = (
+        f"cd {shlex.quote(str(nanogpt_root()))} && "
+        f"{shlex.join(command)} >> {shlex.quote(str(log_path))} 2>&1"
+    )
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session, shell_command],
+        check=True,
+    )
+    print(f"Training started in tmux session: {session}")
+    print(f"Attach with: tmux attach -t {session}")
+    print(f"Follow logs: tail -f {log_path}")
+
+
+def runtime_metadata(manifest: dict[str, object], gpu_count: int) -> dict[str, object]:
+    import torch
+
+    test_gpu = os.environ.get("DMPOD_TEST_GPU_NAME")
+    return {
+        "gpu_model": (
+            [test_gpu for _ in range(gpu_count)]
+            if test_gpu
+            else [torch.cuda.get_device_name(index) for index in range(gpu_count)]
+        ),
+        "gpu_count": gpu_count,
+        "cuda_version": torch.version.cuda,
+        "pytorch_version": torch.__version__,
+        "wandb_version": os.environ.get("DMPOD_TEST_WANDB_VERSION")
+        or importlib.metadata.version("wandb"),
+        "git_commit": manifest["git"]["commit"],
+        "git_dirty": manifest["git"]["dirty"],
+    }
+
+
+def run_v2(
+    args: argparse.Namespace,
+    environment: dict[str, object],
+    run_dir: Path,
+    manifest: dict[str, object],
+) -> None:
+    for name, info in manifest["files"].items():
+        path = run_dir / info["path"]
+        if not path.is_file() or file_sha256(path) != info["sha256"]:
+            raise RuntimeError(f"Immutable run file changed: {name} ({path})")
+    profile = json.loads(
+        (run_dir / manifest["files"]["profile"]["path"]).read_text(encoding="utf-8")
+    )
+    dataset_manifest_path = Path(manifest["dataset"]["manifest_path"])
+    _, current_validation = validate_dataset_manifest(dataset_manifest_path, profile)
+    for split in ("train", "val"):
+        if (
+            current_validation["files"][split]["sha256"]
+            != manifest["dataset"]["files"][split]["sha256"]
+        ):
+            raise RuntimeError(f"Dataset {split} changed after run creation")
+    if (
+        current_validation["tokenizer"]["sha256"]
+        != manifest["dataset"]["tokenizer"]["sha256"]
+    ):
+        raise RuntimeError("Tokenizer changed after run creation")
+
+    resolved = load_json(run_dir / "resolved-config.json")
+    checkpoint = run_dir / "checkpoints" / "ckpt-last.pt"
+    state_path = run_dir / "state.json"
+    previous_state = load_json(state_path) if state_path.is_file() else None
+    if args.resume:
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Cannot resume without {checkpoint}")
+        resume = True
+    elif args.restart:
+        if previous_state is None:
+            raise RuntimeError("Run has not started; --restart is unnecessary")
+        if checkpoint.exists():
+            raise RuntimeError("Checkpoint exists; use --resume instead of --restart")
+        resume = False
+    elif previous_state is not None:
+        raise RuntimeError(
+            f"Run {args.name} has already started; use --resume or --restart explicitly"
+        )
+    else:
+        resume = False
+
+    configured_gpu_count = os.environ.get("DMPOD_GPU_COUNT")
+    if configured_gpu_count is not None:
+        gpu_count = int(configured_gpu_count)
+    else:
+        import torch
+
+        gpu_count = torch.cuda.device_count()
+    if gpu_count < 1:
+        raise RuntimeError("No CUDA GPUs are visible")
+    global_accumulation = int(
+        resolved["batch"]["global_gradient_accumulation_steps"]
+    )
+    if global_accumulation % gpu_count:
+        raise ValueError(
+            "global_gradient_accumulation_steps is not divisible by visible GPUs"
+        )
+
+    wandb = environment["wandb"]
+    if wandb["mode"] == "disabled" or not wandb["enabled"]:
+        raise RuntimeError(
+            "Profile runs require W&B online or explicit offline mode; rerun dmpod-setup"
+        )
+    os.environ["WANDB_MODE"] = wandb["mode"]
+    os.environ["WANDB_DIR"] = str(run_dir / "logs" / "wandb")
+    if wandb.get("entity"):
+        os.environ["WANDB_ENTITY"] = wandb["entity"]
+    if wandb["mode"] == "online":
+        key_source = export_wandb_key(wandb.get("key_source", "none"))
+        if key_source == "none":
+            raise RuntimeError(
+                "W&B online mode requires WANDB_API_KEY or a configured key file"
+            )
+    os.environ["DMPOD_WANDB_ENABLED"] = "1"
+    runtime = runtime_metadata(manifest, gpu_count)
+    atomic_json(run_dir / "runtime.json", runtime)
+    trainer = run_dir / manifest["files"]["trainer_source"]["path"]
+    trainer_args = [str(trainer), "--run-dir", str(run_dir)]
+    if resume:
+        trainer_args.append("--resume")
+    if gpu_count == 1:
+        command = [sys.executable, *trainer_args]
+    else:
+        command = [
+            "torchrun",
+            "--standalone",
+            f"--nproc_per_node={gpu_count}",
+            *trainer_args,
+        ]
+    print("Training command:", shlex.join(command), flush=True)
+    if args.dry_run:
+        return
+    attempts = int(previous_state.get("attempts", 0)) + 1 if previous_state else 1
+    state = {
+        "version": 2,
+        "status": "running",
+        "attempts": attempts,
+        "started_at": now(),
+        "resume": resume,
+        "gpu_count": gpu_count,
+    }
+    atomic_json(state_path, state)
+    try:
+        result = subprocess.run(command, cwd=nanogpt_root(), check=False)
+    except BaseException as error:
+        state.update(status="failed", finished_at=now(), error=type(error).__name__)
+        atomic_json(state_path, state)
+        raise
+    state.update(
+        status="completed" if result.returncode == 0 else "failed",
+        finished_at=now(),
+        exit_code=result.returncode,
+    )
+    atomic_json(state_path, state)
+    raise SystemExit(result.returncode)
 
 
 def main() -> None:
@@ -37,6 +218,7 @@ def main() -> None:
     mode.add_argument("--resume", action="store_true")
     mode.add_argument("--restart", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--tmux", action="store_true")
     args = parser.parse_args()
 
     require_name(args.name, "run name")
@@ -45,12 +227,18 @@ def main() -> None:
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"Unknown training run: {run_dir}")
+    if args.tmux:
+        launch_tmux(args, run_dir)
+        return
     lock = (run_dir / ".train.lock").open("w", encoding="utf-8")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
         raise RuntimeError(f"Training run is already active: {args.name}") from error
     manifest = load_json(manifest_path)
+    if manifest.get("version") == 2:
+        run_v2(args, environment, run_dir, manifest)
+        return
     model_config = run_dir / "model.py"
     training_config = run_dir / "training.py"
     runtime_config = run_dir / "runtime.py"

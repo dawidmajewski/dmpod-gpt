@@ -25,7 +25,7 @@ never overwrites an existing workspace. It then executes the base image's
 ## Build
 
 ```bash
-IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.0.1 scripts/build.sh
+IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.1.0 scripts/build.sh
 ```
 
 The build targets `linux/amd64`. Change the image tag whenever code,
@@ -54,6 +54,19 @@ If a W&B key is entered interactively, setup can save it at
 `WANDB_API_KEY` always takes precedence. The key is never written to TOML or a
 run manifest. Saving it on a Network Volume is explicit and optional.
 
+For reusable Pod credentials, create a RunPod secret named `wandb_api_key` and
+map it in the Pod template without putting the value in the template:
+
+```text
+WANDB_API_KEY={{ RUNPOD_SECRET_wandb_api_key }}
+```
+
+Add this mapping only to a private copy of the template. Each Pod created from
+that template can then use `dmpod-setup --wandb-from-env --non-interactive`;
+setup verifies the key but does not copy it to `/workspace`. The distributed
+template intentionally omits the mapping so users can enter a key through the
+hidden `dmpod-setup` prompt or choose offline mode.
+
 Codex and Claude authentication is intentionally separate:
 
 ```bash
@@ -68,6 +81,7 @@ Built-in small presets:
 ```bash
 dmpod-prepare-data shakespeare_char
 dmpod-prepare-data shakespeare
+dmpod-prepare-data tinystories_smoke
 ```
 
 Register existing nanoGPT binaries from a mounted volume without copying:
@@ -140,6 +154,54 @@ dmpod-create-training continued \
 Changing LR, scheduling, batch size, or evaluation settings only requires a
 training config. Changing `n_layer`, `n_head`, `n_embd`, `block_size`, `bias`,
 or vocabulary is not supported during resume.
+
+## Reproducible profiles
+
+Profile runs use a versioned, immutable run format with a run-local trainer and
+model source. They always write the same metrics to local JSONL and W&B.
+
+The canonical minimal-en profile uses 16 layers, 12 heads, width 768, context
+2048, vocabulary 12,288, tied embeddings, and exactly 124,281,600 trainable
+parameters. Create the first LR candidate with:
+
+```bash
+dmpod-create-training --profile minimal-en-125m --max-lr 6e-4
+dmpod-train lr-0.0006_seed-1337_btok-262144 --tmux
+```
+
+Profile runs require a complete `dataset.json` next to `train.bin`, `val.bin`,
+and the tokenizer file. Start from `datasets/dataset.json.example`. Creation
+scans the binaries once, verifies SHA-256, token counts, tokenizer provenance,
+and that every token ID is below the configured vocabulary size.
+
+W&B online mode is the default. A profile run fails before using the GPU if the
+key is unavailable. Explicit offline mode remains available through
+`dmpod-setup --wandb-mode offline`; local `metrics.jsonl`, `summary.json`, and
+checkpoint records are always written.
+
+Create the canonical W&B dashboard after setup:
+
+```bash
+dmpod-wandb-dashboard --profile minimal-en-125m
+```
+
+Generate a model card and pull-request body after training:
+
+```bash
+dmpod-export-run RUN_NAME --format all
+```
+
+The output is stored in `runs/RUN_NAME/reports/README.md`, `PR_BODY.md`, and
+`report-context.json`. The JSON context is the stable input for future HTML
+converters.
+
+For a quick end-to-end validation using a pinned Hugging Face dataset:
+
+```bash
+dmpod-prepare-data tinystories_smoke
+dmpod-create-training --profile smoke-tinystories
+dmpod-train lr-0.001_seed-1337_btok-8192 --tmux
+```
 
 ## Benchmarks
 

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "minimal-en-corpus-2.5b",
+  "revision": "REPLACE_WITH_VERSION_OR_COMMIT",
+  "license": "REPLACE_WITH_LICENSE",
+  "dtype": "uint16",
+  "files": {
+    "train": {
+      "path": "train.bin",
+      "sha256": "REPLACE_WITH_SHA256",
+      "tokens": 2703768815
+    },
+    "val": {
+      "path": "val.bin",
+      "sha256": "REPLACE_WITH_SHA256",
+      "tokens": 5267742
+    }
+  },
+  "tokenizer": {
+    "path": "tokenizer.json",
+    "sha256": "REPLACE_WITH_SHA256",
+    "name": "REPLACE_WITH_NAME",
+    "version": "REPLACE_WITH_VERSION",
+    "vocab_size": 12288
+  },
+  "document_boundary_token_id": null,
+  "padding_token_id": null,
+  "split_method": "REPLACE_WITH_DOCUMENT_LEVEL_SPLIT_DESCRIPTION",
+  "deduplication_method": "REPLACE_WITH_DESCRIPTION_OR_NONE"
+}

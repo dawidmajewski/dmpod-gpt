@@ -2,17 +2,100 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import subprocess
 import sys
+from itertools import islice
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from dmpod_common import (  # noqa: E402
+    atomic_json,
+    file_sha256,
     load_environment_config,
     nanogpt_root,
     require_name,
     validate_dataset,
 )
+
+
+TINYSTORIES_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
+
+
+def prepare_tinystories_smoke(datasets_root: Path) -> Path:
+    from datasets import load_dataset
+    import tiktoken
+
+    name = "tinystories-smoke"
+    source = datasets_root / name
+    source.mkdir(parents=True, exist_ok=True)
+    encoding = tiktoken.get_encoding("gpt2")
+
+    def write_split(split: str, limit: int, filename: str) -> int:
+        rows = load_dataset(
+            "roneneldan/TinyStories",
+            revision=TINYSTORIES_REVISION,
+            split=split,
+            streaming=True,
+        )
+        token_ids: list[int] = []
+        for row in islice(rows, limit):
+            token_ids.extend(encoding.encode_ordinary(row["text"]))
+            token_ids.append(encoding.eot_token)
+        if not token_ids:
+            raise RuntimeError(f"No TinyStories examples loaded for {split}")
+        destination = source / filename
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        np.asarray(token_ids, dtype=np.uint16).tofile(temporary)
+        temporary.replace(destination)
+        return len(token_ids)
+
+    train_tokens = write_split("train", 2000, "train.bin")
+    val_tokens = write_split("validation", 200, "val.bin")
+    tokenizer_path = source / "tokenizer.json"
+    atomic_json(
+        tokenizer_path,
+        {
+            "implementation": "tiktoken",
+            "encoding": "gpt2",
+            "package_version": importlib.metadata.version("tiktoken"),
+            "vocab_size_with_padding": 50304,
+        },
+    )
+    manifest = {
+        "schema_version": 1,
+        "name": name,
+        "revision": TINYSTORIES_REVISION,
+        "license": "cdla-sharing-1.0",
+        "dtype": "uint16",
+        "files": {
+            "train": {
+                "path": "train.bin",
+                "sha256": file_sha256(source / "train.bin"),
+                "tokens": train_tokens,
+            },
+            "val": {
+                "path": "val.bin",
+                "sha256": file_sha256(source / "val.bin"),
+                "tokens": val_tokens,
+            },
+        },
+        "tokenizer": {
+            "path": "tokenizer.json",
+            "sha256": file_sha256(tokenizer_path),
+            "name": "tiktoken:gpt2",
+            "version": importlib.metadata.version("tiktoken"),
+            "vocab_size": 50304,
+        },
+        "document_boundary_token_id": encoding.eot_token,
+        "padding_token_id": None,
+        "split_method": "Official TinyStories train and validation splits",
+        "deduplication_method": "none beyond the source dataset",
+    }
+    atomic_json(source / "dataset.json", manifest)
+    return register_existing(name, source)
 
 
 def register_existing(name: str, source: Path) -> Path:
@@ -45,7 +128,7 @@ def register_existing(name: str, source: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare or register nanoGPT data.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for preset in ("shakespeare", "shakespeare_char"):
+    for preset in ("shakespeare", "shakespeare_char", "tinystories_smoke"):
         subparsers.add_parser(preset)
     existing = subparsers.add_parser("existing")
     existing.add_argument("name")
@@ -55,7 +138,7 @@ def main() -> None:
     custom.add_argument("--name")
     args = parser.parse_args()
 
-    load_environment_config()
+    environment = load_environment_config()
     root = nanogpt_root()
     if args.command in {"shakespeare", "shakespeare_char"}:
         dataset = root / "data" / args.command
@@ -63,6 +146,10 @@ def main() -> None:
         subprocess.run([sys.executable, str(script)], cwd=dataset, check=True)
         validate_dataset(dataset)
         print(f"Dataset ready: {dataset}")
+        return
+    if args.command == "tinystories_smoke":
+        target = prepare_tinystories_smoke(Path(environment["datasets_root"]))
+        print(f"TinyStories smoke dataset ready: {target}")
         return
     if args.command == "existing":
         target = register_existing(args.name, args.path)

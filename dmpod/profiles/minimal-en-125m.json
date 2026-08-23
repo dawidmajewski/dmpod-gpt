@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "name": "minimal-en-125m",
+  "task": {
+    "type": "causal_language_model_pretraining",
+    "framework": "nanoGPT",
+    "objective": "next_token_cross_entropy"
+  },
+  "model": {
+    "n_layer": 16,
+    "n_head": 12,
+    "n_embd": 768,
+    "block_size": 2048,
+    "vocab_size": 12288,
+    "dropout": 0.0,
+    "bias": false,
+    "weight_tying": true,
+    "target_parameter_count": 125000000,
+    "expected_actual_parameters_total": 124281600,
+    "expected_actual_parameters_non_embedding": 122708736
+  },
+  "data": {
+    "name": "minimal-en-corpus-2.5b",
+    "path": "data/minimal-en-corpus-2.5b",
+    "manifest_file": "dataset.json",
+    "sampling_mode": "random_with_replacement",
+    "expected_train_tokens_unique": 2703768815,
+    "expected_val_tokens": 5267742,
+    "target_data_passes": 4.0
+  },
+  "optimizer": {
+    "optimizer": "AdamW",
+    "max_lr": null,
+    "min_lr_ratio": 0.1,
+    "lr_schedule": "cosine",
+    "warmup_ratio": 0.04847,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
+    "adam_eps": 1e-8,
+    "weight_decay": 0.1,
+    "grad_clip": 1.0
+  },
+  "batch": {
+    "micro_batch_size_per_gpu": 32,
+    "global_gradient_accumulation_steps": 4,
+    "target_effective_batch_tokens": 262144,
+    "budget_rounding": "nearest_full_optimizer_step"
+  },
+  "runtime": {
+    "seed": 1337,
+    "data_seed": 1337,
+    "eval_seed": 4242,
+    "precision": "bfloat16",
+    "allow_tf32": true,
+    "torch_compile": true,
+    "gradient_checkpointing": false,
+    "ddp_backend": "nccl"
+  },
+  "evaluation": {
+    "eval_at_start": true,
+    "eval_at_warmup_end": true,
+    "eval_interval_tokens": 100000000,
+    "eval_at_data_passes": [1.0, 2.0, 3.0, 4.0],
+    "final_eval_required": true,
+    "val_evaluation_mode": "full_validation",
+    "train_eval_subset_enabled": true,
+    "train_eval_subset_tokens": 5267742,
+    "eval_batch_size": 16,
+    "loss_reduction": "token_weighted_mean"
+  },
+  "logging": {
+    "train_log_interval_target_tokens": 10000000,
+    "aggregate_metrics_over_logging_window": true,
+    "log_from_rank_zero_only": true,
+    "synchronize_distributed_metrics_before_logging": true,
+    "exclude_evaluation_from_step_timing": true,
+    "exclude_checkpointing_from_step_timing": true,
+    "exclude_wandb_upload_from_step_timing": true
+  },
+  "checkpoint": {
+    "save_last_checkpoint": true,
+    "save_best_val_checkpoint": true,
+    "save_final_checkpoint": true,
+    "save_at_data_passes": [1.0, 2.0, 3.0, 4.0],
+    "log_wandb_artifacts": true
+  },
+  "wandb": {
+    "project": "nanogpt-125m-minimal-en-2p5b",
+    "group": "lr-sweep-v1",
+    "job_type": "pretrain",
+    "run_name_template": "lr-{max_lr}_seed-{seed}_btok-{effective_batch_tokens}",
+    "tags": ["nanogpt", "causal-lm", "125m", "vocab-12288", "corpus-2p5b", "4-pass", "lr-sweep"],
+    "primary_x_axis": "progress/tokens_seen",
+    "primary_comparison_metric": "final_val_loss",
+    "comparison_goal": "minimize"
+  }
+}
