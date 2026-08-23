@@ -72,7 +72,7 @@ RUN chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
       -e '/^cat \/etc\/runpod\.txt$/d' \
       -e '/For detailed documentation and guides/d' \
       /root/.bashrc && \
-    printf '\ncat /opt/dmpod/banner.txt\n' >> /root/.bashrc && \
+    printf '\nsource /opt/dmpod/shell-banner.sh\n' >> /root/.bashrc && \
     python -m compileall -q /opt/dmpod
 
 WORKDIR /workspace

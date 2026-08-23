@@ -13,6 +13,7 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 BIN = PROJECT / "dmpod" / "bin"
 BANNER = PROJECT / "dmpod" / "banner.txt"
+SHELL_BANNER = PROJECT / "dmpod" / "shell-banner.sh"
 ENTRYPOINT = PROJECT / "scripts" / "container-entrypoint.sh"
 TEMPLATE = PROJECT / "dmpod" / "workspace-template"
 
@@ -215,7 +216,15 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertIn("Academy", banner)
         self.assertIn("https://huggingface.co/SlayerLab", banner)
         self.assertIn("https://github.com/dawidmajewski/dmpod-gpt", banner)
-        self.assertIn('Run "dmpod-setup"', banner)
+
+        before_setup = self.run_command("/bin/bash", str(SHELL_BANNER))
+        self.assertIn('Run "dmpod-setup"', before_setup.stdout)
+
+        config = self.workspace / ".dmpod" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("version = 1\n", encoding="utf-8")
+        after_setup = self.run_command("/bin/bash", str(SHELL_BANNER))
+        self.assertNotIn('Run "dmpod-setup"', after_setup.stdout)
 
     def test_smoke_test_help_does_not_require_a_configured_workspace(self) -> None:
         result = self.run_command(str(BIN / "dmpod-smoke-test"), "--help")
