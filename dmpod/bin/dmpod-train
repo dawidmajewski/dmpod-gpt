@@ -54,10 +54,13 @@ def launch_tmux(args: argparse.Namespace, run_dir: Path) -> None:
     if args.dry_run:
         command.append("--dry-run")
     log_path = run_dir / "logs" / "training.log"
-    shell_command = (
+    training_command = (
+        "set -o pipefail; "
         f"cd {shlex.quote(str(nanogpt_root()))} && "
-        f"{shlex.join(command)} >> {shlex.quote(str(log_path))} 2>&1"
+        f"PYTHONUNBUFFERED=1 {shlex.join(command)} 2>&1 | "
+        f"tee -a {shlex.quote(str(log_path))}"
     )
+    shell_command = f"exec bash -lc {shlex.quote(training_command)}"
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", session, shell_command],
         check=True,

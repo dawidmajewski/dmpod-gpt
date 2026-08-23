@@ -123,6 +123,26 @@ class Api:
             filter(None, (str(modules), self.env.get("PYTHONPATH")))
         )
 
+    def install_fake_tmux(self) -> Path:
+        binaries = self.root / "test-bin"
+        binaries.mkdir()
+        capture = self.root / "tmux-arguments.txt"
+        tmux = binaries / "tmux"
+        tmux.write_text(
+            """\
+#!/bin/sh
+if [ "$1" = "has-session" ]; then
+    exit 1
+fi
+printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        self.env["DMPOD_TEST_TMUX_ARGUMENTS"] = str(capture)
+        self.env["PATH"] = os.pathsep.join((str(binaries), self.env["PATH"]))
+        return capture
+
     def test_entrypoint_copies_git_and_does_not_overwrite_workspace(self) -> None:
         self.initialize_workspace()
         nanogpt = self.workspace / "nanogpt"
@@ -294,6 +314,17 @@ class Api:
             "Training command:",
             self.run_command(str(BIN / "dmpod-train"), "test-run", "--dry-run").stdout,
         )
+
+        tmux_arguments = self.install_fake_tmux()
+        launched = self.run_command(
+            str(BIN / "dmpod-train"), "test-run", "--tmux"
+        )
+        shell_command = tmux_arguments.read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("set -o pipefail", shell_command)
+        self.assertIn("PYTHONUNBUFFERED=1", shell_command)
+        self.assertIn("2>&1 | tee -a", shell_command)
+        self.assertIn("logs/training.log", shell_command)
+        self.assertIn("tmux attach -t dmpod-test-run", launched.stdout)
 
         (run / "state.json").write_text(
             json.dumps({"version": 1, "status": "failed", "attempts": 1}),
