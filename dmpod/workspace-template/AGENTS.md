@@ -16,8 +16,9 @@ as a comparison point.
 
 ## Commands
 
-- `dmpod-setup`: configure storage, caches, and optional W&B access only. It
-  never chooses a model, dataset, checkpoint, or training configuration.
+- `dmpod-setup`: configure storage, caches, and optional W&B and Hugging Face
+  access only. It never chooses a model, dataset, checkpoint, or training
+  configuration.
 - `dmpod-prepare-data shakespeare_char|shakespeare`: run an upstream preset.
 - `dmpod-prepare-data existing NAME PATH`: register existing uint16 binaries
   from the attached volume without copying them.

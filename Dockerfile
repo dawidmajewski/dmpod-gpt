@@ -68,6 +68,11 @@ RUN chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
     for command in /opt/dmpod/bin/*; do \
       ln -s "$command" "/usr/local/bin/$(basename "$command")"; \
     done && \
+    sed -i \
+      -e '/^cat \/etc\/runpod\.txt$/d' \
+      -e '/For detailed documentation and guides/d' \
+      /root/.bashrc && \
+    printf '\ncat /opt/dmpod/banner.txt\n' >> /root/.bashrc && \
     python -m compileall -q /opt/dmpod
 
 WORKDIR /workspace

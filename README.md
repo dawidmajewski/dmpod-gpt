@@ -40,13 +40,13 @@ or Jupyter and run:
 dmpod-setup
 ```
 
-`dmpod-setup` configures only storage paths, caches, and optional W&B access. It
-does not choose a model, dataset, source weights, checkpoint, or training
-settings. Non-interactive examples:
+`dmpod-setup` configures only storage paths, caches, and optional W&B and
+Hugging Face access. It does not choose a model, dataset, source weights,
+checkpoint, or training settings. Non-interactive examples:
 
 ```bash
-dmpod-setup --wandb-from-env --non-interactive
-dmpod-setup --skip-wandb --non-interactive
+dmpod-setup --wandb-from-env --hf-from-env --non-interactive
+dmpod-setup --skip-wandb --skip-hf --non-interactive
 ```
 
 If a W&B key is entered interactively, setup can save it at
@@ -55,6 +55,13 @@ If a W&B key is entered interactively, setup can save it at
 run manifest. Saving it on a Network Volume is explicit and optional.
 `dmpod-setup` also registers a verified online key with the standard W&B client,
 so `wandb` commands and agent tools use the same authenticated account.
+
+Hugging Face login is optional and uses a hidden `HF_TOKEN` prompt. A valid
+personal token is registered with the standard `huggingface_hub` client under
+`HF_HOME=/workspace/cache/huggingface`, so `hf`, Transformers, datasets, and
+agent tools reuse it across Pods attached to the same workspace. Tokens are
+verified before they are saved and are never written to DMPod configuration or
+run manifests.
 
 For reusable Pod credentials, create a RunPod secret named `wandb_api_key` and
 map it in the Pod template without putting the value in the template:

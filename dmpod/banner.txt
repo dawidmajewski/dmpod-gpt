@@ -1,0 +1,13 @@
+_____ _                         _          _
+ / ____| |                       | |        | |
+| (___ | | __ _ _   _  ___ _ __| |     __ _| |__
+ \___ \| |/ _` | | | |/ _ \ '__| |    / _` | '_ \
+ ____) | | (_| | |_| |  __/ |  | |___| (_| | |_) |
+|_____/|_|\__,_|\__, |\___|_|  |______\__,_|_.__/  Academy
+                 __/ |
+                |___/
+
+Hugging Face: https://huggingface.co/SlayerLab
+Instructions: https://github.com/dawidmajewski/dmpod-gpt
+
+Run "dmpod-setup" to set up Weights & Biases and Hugging Face login.

@@ -45,13 +45,35 @@ def verify_wandb_key(key: str) -> str:
     return str(entity)
 
 
+def login_huggingface(token: str) -> str:
+    from huggingface_hub import HfApi, login
+
+    try:
+        login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
+        account = HfApi(token=token).whoami()
+    except Exception as error:
+        raise SystemExit(
+            "Hugging Face rejected the configured token; create a current personal "
+            "token at https://huggingface.co/settings/tokens and rerun dmpod-setup"
+        ) from error
+    username = account.get("name")
+    if not username:
+        raise SystemExit("Hugging Face did not return a username for this account")
+    return str(username)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Configure DMPod storage, caches, and optional W&B access."
+        description=(
+            "Configure DMPod storage, caches, and optional W&B and Hugging Face access."
+        )
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--skip-wandb", action="store_true")
     group.add_argument("--wandb-from-env", action="store_true")
+    hf_group = parser.add_mutually_exclusive_group()
+    hf_group.add_argument("--skip-hf", action="store_true")
+    hf_group.add_argument("--hf-from-env", action="store_true")
     parser.add_argument("--save-wandb-key", action="store_true")
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-entity")
@@ -158,6 +180,34 @@ def main() -> None:
     if key_path_to_write is not None:
         atomic_write(key_path_to_write, provided_key + "\n", mode=0o600)
 
+    hf_username = ""
+    hf_source = "none"
+    if not args.skip_hf:
+        from huggingface_hub import get_token
+
+        hf_token = ""
+        if args.hf_from_env:
+            hf_token = os.environ.get("HF_TOKEN", "")
+            if not hf_token:
+                raise SystemExit("HF_TOKEN is not set")
+            hf_source = "environment"
+        elif os.environ.get("HF_TOKEN"):
+            hf_token = os.environ["HF_TOKEN"]
+            hf_source = "environment"
+        elif cached_token := get_token():
+            hf_token = cached_token
+            hf_source = "cached"
+        elif not args.non_interactive and confirm(
+            "Configure Hugging Face?", default=True
+        ):
+            hf_token = getpass.getpass(
+                "HF_TOKEN (hidden, press Enter to skip): "
+            ).strip()
+            if hf_token:
+                hf_source = "interactive"
+        if hf_token:
+            hf_username = login_huggingface(hf_token)
+
     config = {
         "version": 1,
         "workspace_root": str(root),
@@ -175,6 +225,10 @@ def main() -> None:
     print(f"DMPod environment configured: {config_path()}")
     print(f"nanoGPT workspace: {nanogpt_root()}")
     print(f"W&B mode: {mode}; key source: {key_source}")
+    if hf_username:
+        print(f"Hugging Face: connected as {hf_username}; token source: {hf_source}")
+    else:
+        print("Hugging Face: not configured")
 
 
 if __name__ == "__main__":

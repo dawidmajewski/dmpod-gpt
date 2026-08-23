@@ -12,6 +12,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 BIN = PROJECT / "dmpod" / "bin"
+BANNER = PROJECT / "dmpod" / "banner.txt"
 ENTRYPOINT = PROJECT / "scripts" / "container-entrypoint.sh"
 TEMPLATE = PROJECT / "dmpod" / "workspace-template"
 
@@ -33,6 +34,8 @@ class DMPodCliTests(unittest.TestCase):
         )
         self.env = os.environ.copy()
         self.env.pop("WANDB_API_KEY", None)
+        self.env.pop("HF_TOKEN", None)
+        self.env.pop("HUGGING_FACE_HUB_TOKEN", None)
         self.env.update(
             DMPOD_WORKSPACE=str(self.workspace),
             DMPOD_NANOGPT_ROOT=str(self.workspace / "nanogpt"),
@@ -42,6 +45,7 @@ class DMPodCliTests(unittest.TestCase):
             DMPOD_GPU_COUNT="1",
             DMPOD_TEST_GPU_NAME="Test GPU",
             DMPOD_TEST_WANDB_VERSION="test",
+            HF_HOME=str(self.workspace / "cache" / "huggingface"),
             HOME=str(self.home),
         )
 
@@ -88,6 +92,7 @@ class DMPodCliTests(unittest.TestCase):
             str(BIN / "dmpod-setup"),
             "--wandb-mode",
             "offline",
+            "--skip-hf",
             "--non-interactive",
         )
 
@@ -123,6 +128,58 @@ class Api:
             filter(None, (str(modules), self.env.get("PYTHONPATH")))
         )
 
+    def install_fake_huggingface(self, expected_credential: str) -> None:
+        modules = self.root / "test-modules"
+        modules.mkdir(exist_ok=True)
+        package = modules / "huggingface_hub"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            """\
+import os
+from pathlib import Path
+
+
+def _token_path():
+    return Path(os.environ["HF_HOME"]) / "token"
+
+
+def get_token():
+    if token := os.environ.get("HF_TOKEN"):
+        return token
+    if _token_path().is_file():
+        return os.environ["DMPOD_TEST_HF_CREDENTIAL"]
+    return None
+
+
+def login(token, add_to_git_credential, skip_if_logged_in):
+    if (
+        token != os.environ["DMPOD_TEST_HF_CREDENTIAL"]
+        or add_to_git_credential
+        or skip_if_logged_in
+    ):
+        raise ValueError("rejected test credential")
+    path = _token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("test Hugging Face credentials configured\\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+class HfApi:
+    def __init__(self, token):
+        self.token = token
+
+    def whoami(self):
+        if self.token != os.environ["DMPOD_TEST_HF_CREDENTIAL"]:
+            raise ValueError("rejected test credential")
+        return {"name": "test-hf-user"}
+""",
+            encoding="utf-8",
+        )
+        self.env["DMPOD_TEST_HF_CREDENTIAL"] = expected_credential
+        self.env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(modules), self.env.get("PYTHONPATH")))
+        )
+
     def install_fake_tmux(self) -> Path:
         binaries = self.root / "test-bin"
         binaries.mkdir()
@@ -153,6 +210,13 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.initialize_workspace()
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
 
+    def test_banner_identifies_slayerlab_and_links_instructions(self) -> None:
+        banner = BANNER.read_text(encoding="utf-8")
+        self.assertIn("Academy", banner)
+        self.assertIn("https://huggingface.co/SlayerLab", banner)
+        self.assertIn("https://github.com/dawidmajewski/dmpod-gpt", banner)
+        self.assertIn('Run "dmpod-setup"', banner)
+
     def test_smoke_test_help_does_not_require_a_configured_workspace(self) -> None:
         result = self.run_command(str(BIN / "dmpod-smoke-test"), "--help")
         self.assertIn("TinyStories GPU and W&B smoke test", result.stdout)
@@ -175,6 +239,7 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
 
         result = self.run_command(
             str(BIN / "dmpod-setup"),
+            "--skip-hf",
             input_text=f"\n{credential}\ny\n",
         )
 
@@ -194,6 +259,7 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
 
         reused = self.run_command(
             str(BIN / "dmpod-setup"),
+            "--skip-hf",
             "--non-interactive",
         )
         self.assertIn("key source: workspace", reused.stdout)
@@ -205,6 +271,7 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
 
         result = self.run_failure(
             str(BIN / "dmpod-setup"),
+            "--skip-hf",
             input_text=f"\n{rejected_credential}\ny\n",
         )
 
@@ -224,6 +291,7 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
 
         result = self.run_command(
             str(BIN / "dmpod-setup"),
+            "--skip-hf",
             input_text=f"\n{credential}\n\n",
         )
 
@@ -240,6 +308,48 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertNotIn(credential, config)
         self.assertNotIn(credential, result.stdout)
         self.assertNotIn(credential, result.stderr)
+
+    def test_setup_logs_into_huggingface_and_reuses_cached_token(self) -> None:
+        self.initialize_workspace()
+        credential = secrets.token_hex(24)
+        self.install_fake_huggingface(credential)
+
+        result = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--skip-wandb",
+            input_text=f"\n{credential}\n",
+        )
+
+        token_path = Path(self.env["HF_HOME"]) / "token"
+        self.assertTrue(token_path.is_file())
+        self.assertEqual(stat.S_IMODE(token_path.stat().st_mode), 0o600)
+        self.assertIn("Hugging Face: connected as test-hf-user", result.stdout)
+        self.assertNotIn(credential, result.stdout)
+        self.assertNotIn(credential, result.stderr)
+
+        reused = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--skip-wandb",
+            "--non-interactive",
+        )
+        self.assertIn("token source: cached", reused.stdout)
+
+    def test_setup_does_not_save_rejected_huggingface_token(self) -> None:
+        self.initialize_workspace()
+        self.install_fake_huggingface(secrets.token_hex(24))
+        rejected_credential = secrets.token_hex(24)
+
+        result = self.run_failure(
+            str(BIN / "dmpod-setup"),
+            "--skip-wandb",
+            input_text=f"\n{rejected_credential}\n",
+        )
+
+        self.assertIn("Hugging Face rejected the configured token", result.stderr)
+        self.assertNotIn(rejected_credential, result.stdout)
+        self.assertNotIn(rejected_credential, result.stderr)
+        self.assertFalse((Path(self.env["HF_HOME"]) / "token").exists())
+        self.assertFalse((self.workspace / ".dmpod" / "config.toml").exists())
 
     def test_registers_existing_dataset_without_copying(self) -> None:
         self.initialize_workspace()
