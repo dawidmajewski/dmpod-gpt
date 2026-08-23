@@ -3,7 +3,7 @@ FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404@sha256:4d1721e62b56d345c83b
 ARG NANOGPT_REPOSITORY=https://github.com/karpathy/nanoGPT.git
 ARG NANOGPT_REVISION=3adf61e154c3fe3fca428ad6bc3818b27a3b8291
 ARG CODEX_VERSION=0.149.0
-ARG CODEX_SHA256=7368b2055ed02157fea2695bb9f5af3ee7b0e40c5a3bebc81dfc596704244cfd
+ARG CODEX_SHA256=1c08ba262820b78d49ea7a93f326b6b430b72e5fe46830e433edef12e5123244
 ARG CLAUDE_VERSION=2.1.240
 ARG CLAUDE_SHA256=1386169da77de19a655f07a86ab80f5775983a50eb0c9c27a7daf16e7320322d
 
@@ -35,12 +35,15 @@ RUN git clone "$NANOGPT_REPOSITORY" /opt/nanogpt && \
     test -z "$(git -C /opt/nanogpt status --short)"
 
 RUN curl --fail --location --silent --show-error \
-      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
-      --output /tmp/codex.tar.gz && \
-    printf '%s  %s\n' "$CODEX_SHA256" /tmp/codex.tar.gz | sha256sum --check --strict - && \
-    tar -xzf /tmp/codex.tar.gz -C /tmp && \
-    install -m 0755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex && \
-    rm -f /tmp/codex.tar.gz /tmp/codex-x86_64-unknown-linux-musl && \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz" \
+      --output /tmp/codex-package.tar.gz && \
+    printf '%s  %s\n' "$CODEX_SHA256" /tmp/codex-package.tar.gz | sha256sum --check --strict - && \
+    mkdir -p /opt/codex && \
+    tar -xzf /tmp/codex-package.tar.gz -C /opt/codex && \
+    ln -s /opt/codex/bin/codex /usr/local/bin/codex && \
+    ln -s /opt/codex/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host && \
+    rm -f /tmp/codex-package.tar.gz && \
+    codex-code-mode-host --help >/dev/null && \
     codex --version
 
 RUN curl --fail --location --silent --show-error \

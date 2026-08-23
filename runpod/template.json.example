@@ -9,7 +9,7 @@
     "TORCH_HOME": "/workspace/cache/torch",
     "WANDB_DIR": "/workspace/logs/wandb"
   },
-  "imageName": "dawidmkrk/dmpod-gpt:v1.0.0",
+  "imageName": "dawidmkrk/dmpod-gpt:v1.0.1",
   "isPublic": false,
   "isServerless": false,
   "name": "dmpod-gpt-v1",

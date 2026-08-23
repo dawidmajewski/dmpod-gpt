@@ -25,7 +25,7 @@ never overwrites an existing workspace. It then executes the base image's
 ## Build
 
 ```bash
-IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.0.0 scripts/build.sh
+IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.0.1 scripts/build.sh
 ```
 
 The build targets `linux/amd64`. Change the image tag whenever code,
