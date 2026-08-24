@@ -68,6 +68,7 @@ def flatten_wandb_config(
     logging = config["logging"]
     checkpoint = config["checkpoint"]
     values: dict[str, Any] = {
+        "config_schema": config["schema"],
         "config_schema_version": config["schema_version"],
         "profile": config["profile"],
         "task_type": config["task"]["type"],
@@ -461,7 +462,8 @@ def save_checkpoint(
     last_path = checkpoint_dir / "ckpt-last.pt"
     if rank == 0:
         checkpoint = {
-            "version": 2,
+            "schema": "dmpod.checkpoint",
+            "schema_version": 1,
             "model": base_model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict() if scaler.is_enabled() else None,
@@ -545,7 +547,14 @@ def main() -> None:
     initialization.add_argument("--init-from", type=Path)
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
-    config = json.loads((run_dir / "resolved-config.json").read_text(encoding="utf-8"))
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    if (
+        config.get("schema") != "dmpod.config"
+        or config.get("schema_version") != 1
+    ):
+        raise ValueError(
+            f"Unsupported training configuration: {run_dir / 'config.json'}"
+        )
     runtime_path = run_dir / "runtime.json"
     runtime = (
         json.loads(runtime_path.read_text(encoding="utf-8"))
@@ -582,7 +591,7 @@ def main() -> None:
     local_tokens_per_attempt = micro_batch * accumulation * block_size
     effective_tokens = local_tokens_per_attempt * world_size
     if effective_tokens != config["batch"]["effective_batch_tokens"]:
-        raise RuntimeError("Runtime effective batch differs from the resolved profile")
+        raise RuntimeError("Runtime effective batch differs from config.json")
 
     torch.manual_seed(int(config["runtime"]["seed"]) + rank)
     if device.type == "cuda":
@@ -648,7 +657,10 @@ def main() -> None:
         checkpoint = torch.load(
             checkpoint_path, map_location=device, weights_only=False
         )
-        if checkpoint.get("version") != 2:
+        if (
+            checkpoint.get("schema") != "dmpod.checkpoint"
+            or checkpoint.get("schema_version") != 1
+        ):
             raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
         if checkpoint.get("full_training_config") != config:
             raise RuntimeError(
@@ -664,11 +676,11 @@ def main() -> None:
         initialization_state = torch.load(
             args.init_from, map_location=device, weights_only=False
         )
-        if initialization_state.get("version") != 2:
+        if initialization_state.get("schema") not in {
+            "dmpod.checkpoint",
+            "dmpod.initial-weights",
+        } or initialization_state.get("schema_version") != 1:
             raise ValueError(f"Unsupported initialization format: {args.init_from}")
-        artifact_type = initialization_state.get("artifact")
-        if artifact_type not in (None, "initial-weights"):
-            raise ValueError(f"Unsupported initialization artifact: {artifact_type!r}")
         state = {
             key.removeprefix("_orig_mod."): value
             for key, value in initialization_state["model"].items()

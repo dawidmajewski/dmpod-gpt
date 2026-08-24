@@ -431,15 +431,17 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         )
         run = self.workspace / "runs" / "test-run"
         manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
-        resolved = json.loads(
-            (run / "resolved-config.json").read_text(encoding="utf-8")
+        config = json.loads(
+            (run / "config.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["schema"], "dmpod.run")
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(config["schema"], "dmpod.config")
         self.assertEqual(manifest["source"]["type"], "scratch")
-        self.assertEqual(resolved["model"]["n_head"], 2)
-        self.assertEqual(resolved["model"]["vocab_size"], 50304)
-        self.assertEqual(resolved["batch"]["target_update_steps"], 600000)
-        self.assertEqual(resolved["evaluation"]["val_evaluation_mode"], "fixed_subset")
+        self.assertEqual(config["model"]["n_head"], 2)
+        self.assertEqual(config["model"]["vocab_size"], 50304)
+        self.assertEqual(config["batch"]["target_update_steps"], 600000)
+        self.assertEqual(config["evaluation"]["val_evaluation_mode"], "fixed_subset")
         self.assertTrue((run / "sources" / "model-config.py").is_file())
         self.assertTrue((run / "sources" / "training-config.py").is_file())
         self.assertTrue((run / "sources" / "model.py").is_file())
@@ -463,7 +465,14 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertIn("tmux attach -t dmpod-test-run", launched.stdout)
 
         (run / "state.json").write_text(
-            json.dumps({"version": 2, "status": "failed", "attempts": 1}),
+            json.dumps(
+                {
+                    "schema": "dmpod.run-state",
+                    "schema_version": 1,
+                    "status": "failed",
+                    "attempts": 1,
+                }
+            ),
             encoding="utf-8",
         )
         restarted = self.run_command(
@@ -476,10 +485,11 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         source_checkpoint = self.root / "source-checkpoint.pt"
         torch.save(
             {
-                "version": 2,
+                "schema": "dmpod.checkpoint",
+                "schema_version": 1,
                 "model": {},
-                "model_args": resolved["model"],
-                "full_training_config": resolved,
+                "model_args": config["model"],
+                "full_training_config": config,
                 "tokenizer_reference": manifest["dataset"]["tokenizer"],
             },
             source_checkpoint,
@@ -500,7 +510,8 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         continued_manifest = json.loads(
             (continued / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(continued_manifest["version"], 2)
+        self.assertEqual(continued_manifest["schema"], "dmpod.run")
+        self.assertEqual(continued_manifest["schema_version"], 1)
         self.assertEqual(continued_manifest["source"]["type"], "checkpoint")
         self.assertIn(
             "--init-from",
@@ -566,7 +577,7 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         (dataset / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
         return dataset
 
-    def test_profile_run_snapshots_resolved_config_and_dataset_hashes(self) -> None:
+    def test_profile_run_snapshots_config_and_dataset_hashes(self) -> None:
         self.initialize_workspace()
         self.setup_environment()
         nanogpt = self.workspace / "nanogpt"
@@ -597,12 +608,14 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertIn(name, result.stdout)
         run = self.workspace / "runs" / name
         manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
-        resolved = json.loads(
-            (run / "resolved-config.json").read_text(encoding="utf-8")
+        config = json.loads(
+            (run / "config.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], 2)
-        self.assertEqual(resolved["model"]["actual_parameters_total"], 16091392)
-        self.assertEqual(resolved["dataset"]["files"]["train"]["tokens"], 1024)
+        self.assertEqual(manifest["schema"], "dmpod.run")
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(config["schema"], "dmpod.config")
+        self.assertEqual(config["model"]["actual_parameters_total"], 16091392)
+        self.assertEqual(config["dataset"]["files"]["train"]["tokens"], 1024)
         self.assertTrue((run / "sources" / "trainer.py").is_file())
         self.assertTrue((run / "eval" / "train_offsets.npy").is_file())
         dry_run = self.run_command(str(BIN / "dmpod-train"), name, "--dry-run")

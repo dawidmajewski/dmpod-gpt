@@ -77,8 +77,8 @@ class GPT(torch.nn.Module):
                     cache_dir=root / "cache",
                 )
                 artifact = torch.load(output, map_location="cpu", weights_only=False)
-                self.assertEqual(artifact["version"], 2)
-                self.assertEqual(artifact["artifact"], "initial-weights")
+                self.assertEqual(artifact["schema"], "dmpod.initial-weights")
+                self.assertEqual(artifact["schema_version"], 1)
                 self.assertEqual(artifact["source"]["revision"], "abc123")
                 self.assertIn("transformer.wte.weight", artifact["model"])
                 self.assertIn("lm_head.weight", artifact["model"])

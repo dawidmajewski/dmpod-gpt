@@ -31,7 +31,7 @@ from dmpod_profile import (  # noqa: E402
     profile_from_configs,
     resolve_profile,
     validate_dataset_manifest,
-    write_resolved_config,
+    write_config,
     write_train_eval_offsets,
     write_val_eval_offsets,
 )
@@ -113,7 +113,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
         shutil.copy2(tokenizer_source, tokenizer_copy)
         shutil.copy2(nanogpt_root() / "model.py", model_copy)
         shutil.copy2(
-            Path(__file__).resolve().parents[1] / "lib" / "trainer_v2.py",
+            Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
         )
 
@@ -132,8 +132,8 @@ def create_profile_run(args: argparse.Namespace) -> None:
             resolved["evaluation"]["val_eval_offsets"] = write_val_eval_offsets(
                 staging, resolved
             )
-        resolved_path = staging / "resolved-config.json"
-        write_resolved_config(resolved_path, resolved)
+        config_path = staging / "config.json"
+        write_config(config_path, resolved)
         provenance = git_provenance(nanogpt_root())
         tracked = {
             "profile": profile_copy,
@@ -142,7 +142,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
             "tokenizer": tokenizer_copy,
             "model_source": model_copy,
             "trainer_source": trainer_copy,
-            "resolved_config": resolved_path,
+            "config": config_path,
             "train_eval_offsets": staging
             / resolved["evaluation"]["train_eval_offsets"]["path"],
         }
@@ -151,7 +151,8 @@ def create_profile_run(args: argparse.Namespace) -> None:
                 staging / resolved["evaluation"]["val_eval_offsets"]["path"]
             )
         run_manifest = {
-            "version": 2,
+            "schema": "dmpod.run",
+            "schema_version": 1,
             "name": name,
             "created_at": resolved["created_at"],
             "profile": args.profile,
@@ -182,7 +183,10 @@ def validate_checkpoint(
     import torch
 
     checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
-    if checkpoint.get("version") != 2:
+    if (
+        checkpoint.get("schema") != "dmpod.checkpoint"
+        or checkpoint.get("schema_version") != 1
+    ):
         raise ValueError(f"Unsupported checkpoint format: {path}")
     for key in ("model", "model_args", "full_training_config", "tokenizer_reference"):
         if key not in checkpoint:
@@ -390,7 +394,7 @@ def create_config_run(args: argparse.Namespace) -> None:
         shutil.copy2(tokenizer_source, tokenizer_copy)
         shutil.copy2(nanogpt_root() / "model.py", model_copy)
         shutil.copy2(
-            Path(__file__).resolve().parents[1] / "lib" / "trainer_v2.py",
+            Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
         )
         resolved["evaluation"]["train_eval_offsets"] = write_train_eval_offsets(
@@ -400,8 +404,8 @@ def create_config_run(args: argparse.Namespace) -> None:
             resolved["evaluation"]["val_eval_offsets"] = write_val_eval_offsets(
                 staging, resolved
             )
-        resolved_path = staging / "resolved-config.json"
-        write_resolved_config(resolved_path, resolved)
+        config_path = staging / "config.json"
+        write_config(config_path, resolved)
         provenance = git_provenance(nanogpt_root())
         tracked = {
             "profile": profile_copy,
@@ -412,7 +416,7 @@ def create_config_run(args: argparse.Namespace) -> None:
             "tokenizer": tokenizer_copy,
             "model_source": model_copy,
             "trainer_source": trainer_copy,
-            "resolved_config": resolved_path,
+            "config": config_path,
             "train_eval_offsets": staging
             / resolved["evaluation"]["train_eval_offsets"]["path"],
         }
@@ -421,7 +425,8 @@ def create_config_run(args: argparse.Namespace) -> None:
                 staging / resolved["evaluation"]["val_eval_offsets"]["path"]
             )
         run_manifest = {
-            "version": 2,
+            "schema": "dmpod.run",
+            "schema_version": 1,
             "name": args.name,
             "created_at": resolved["created_at"],
             "profile": "config",

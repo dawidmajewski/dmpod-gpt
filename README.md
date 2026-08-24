@@ -114,7 +114,7 @@ no automated OpenWebText preset.
 ## Training definitions
 
 Architecture and training settings can be supplied as separate nanoGPT Python
-configs. A run compiles them into `resolved-config.json` and snapshots the
+configs. A run compiles them into `config.json` and snapshots the
 configs, tokenizer, dataset metadata, model source, and trainer under `sources/`.
 All provenance and immutable file hashes are recorded in `manifest.json`:
 

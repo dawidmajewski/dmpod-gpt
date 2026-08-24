@@ -87,7 +87,7 @@ def runtime_metadata(manifest: dict[str, object], gpu_count: int) -> dict[str, o
     }
 
 
-def run_v2(
+def run_training(
     args: argparse.Namespace,
     environment: dict[str, object],
     run_dir: Path,
@@ -114,10 +114,22 @@ def run_v2(
     ):
         raise RuntimeError("Tokenizer changed after run creation")
 
-    resolved = load_json(run_dir / "resolved-config.json")
+    config = load_json(run_dir / "config.json")
+    if (
+        config.get("schema") != "dmpod.config"
+        or config.get("schema_version") != 1
+    ):
+        raise ValueError(
+            f"Unsupported training configuration: {run_dir / 'config.json'}"
+        )
     checkpoint = run_dir / "checkpoints" / "ckpt-last.pt"
     state_path = run_dir / "state.json"
     previous_state = load_json(state_path) if state_path.is_file() else None
+    if previous_state is not None and (
+        previous_state.get("schema") != "dmpod.run-state"
+        or previous_state.get("schema_version") != 1
+    ):
+        raise ValueError(f"Unsupported run state format: {state_path}")
     source = manifest["source"]
     initialization_path: Path | None = None
     if args.resume:
@@ -159,7 +171,7 @@ def run_v2(
     if gpu_count < 1:
         raise RuntimeError("No CUDA GPUs are visible")
     global_accumulation = int(
-        resolved["batch"]["global_gradient_accumulation_steps"]
+        config["batch"]["global_gradient_accumulation_steps"]
     )
     if global_accumulation % gpu_count:
         raise ValueError(
@@ -204,7 +216,8 @@ def run_v2(
         return
     attempts = int(previous_state.get("attempts", 0)) + 1 if previous_state else 1
     state = {
-        "version": 2,
+        "schema": "dmpod.run-state",
+        "schema_version": 1,
         "status": "running",
         "attempts": attempts,
         "started_at": now(),
@@ -220,7 +233,7 @@ def run_v2(
                 model_id=source["model_id"],
                 revision=source.get("revision"),
                 output=initialization_path,
-                model_config=resolved["model"],
+                model_config=config["model"],
                 cache_dir=Path(environment["hf_cache"]),
             )
         result = subprocess.run(command, cwd=nanogpt_root(), check=False)
@@ -265,11 +278,14 @@ def main() -> None:
     except BlockingIOError as error:
         raise RuntimeError(f"Training run is already active: {args.name}") from error
     manifest = load_json(manifest_path)
-    if manifest.get("version") != 2:
+    if (
+        manifest.get("schema") != "dmpod.run"
+        or manifest.get("schema_version") != 1
+    ):
         raise ValueError(
             f"Run {args.name} uses an unsupported format; create a new DMPod run"
         )
-    run_v2(args, environment, run_dir, manifest)
+    run_training(args, environment, run_dir, manifest)
 
 
 if __name__ == "__main__":

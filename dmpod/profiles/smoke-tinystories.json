@@ -84,7 +84,7 @@
   },
   "wandb": {
     "project": "dmpod-gpt-smoke",
-    "group": "trainer-v2-validation",
+    "group": "trainer-validation",
     "job_type": "smoke-test",
     "run_name_template": "lr-{max_lr}_seed-{seed}_btok-{effective_batch_tokens}",
     "tags": ["nanogpt", "causal-lm", "smoke-test", "tinystories"],

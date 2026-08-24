@@ -83,9 +83,17 @@ def main() -> None:
     environment = load_environment_config()
     run_dir = Path(environment["runs_root"]) / args.name
     manifest = load(run_dir / "manifest.json")
-    if manifest.get("version") != 2:
+    if (
+        manifest.get("schema") != "dmpod.run"
+        or manifest.get("schema_version") != 1
+    ):
         raise ValueError("Unsupported run format; create a new DMPod run")
-    config = load(run_dir / "resolved-config.json")
+    config = load(run_dir / "config.json")
+    if (
+        config.get("schema") != "dmpod.config"
+        or config.get("schema_version") != 1
+    ):
+        raise ValueError("Unsupported training configuration")
     summary = load(run_dir / "summary.json")
     runtime = load(run_dir / "runtime.json")
     artifacts = load(run_dir / "artifacts.json", required=False)

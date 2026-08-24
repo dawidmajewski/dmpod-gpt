@@ -10,7 +10,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "dmpod" / "lib"))
 
 from dmpod_profile import load_profile, parameter_counts, validate_profile
-from trainer_v2 import Reporter, event_thresholds, learning_rate
+from trainer import Reporter, event_thresholds, learning_rate
 
 
 class ProfileTests(unittest.TestCase):
@@ -67,6 +67,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_reporter_uses_tokens_axis_and_writes_local_metrics(self) -> None:
         profile = load_profile("smoke-tinystories")[1]
+        profile["schema"] = "dmpod.config"
         profile["profile"] = profile["name"]
         profile["name"] = "smoke-run"
         profile["model"].update(parameter_counts(profile["model"]))

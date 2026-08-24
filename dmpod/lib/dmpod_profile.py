@@ -499,6 +499,7 @@ def resolve_profile(
 ) -> dict[str, Any]:
     resolved = copy.deepcopy(profile)
     validate_profile(resolved)
+    resolved["schema"] = "dmpod.config"
     if max_lr is not None:
         if max_lr <= 0:
             raise ValueError("--max-lr must be positive")
@@ -616,5 +617,5 @@ def write_val_eval_offsets(run_dir: Path, resolved: dict[str, Any]) -> dict[str,
     }
 
 
-def write_resolved_config(path: Path, resolved: dict[str, Any]) -> None:
-    atomic_json(path, resolved)
+def write_config(path: Path, config: dict[str, Any]) -> None:
+    atomic_json(path, config)

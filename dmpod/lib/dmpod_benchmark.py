@@ -253,7 +253,10 @@ class NanoGPTBackend:
             mmap=True,
             weights_only=False,
         )
-        if checkpoint.get("version") != 2:
+        if (
+            checkpoint.get("schema") != "dmpod.checkpoint"
+            or checkpoint.get("schema_version") != 1
+        ):
             raise ValueError("Unsupported checkpoint format; create a new DMPod run")
         model_args = checkpoint["model_args"]
         self.block_size = int(model_args["block_size"])

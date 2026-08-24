@@ -71,8 +71,8 @@ def import_hf_weights(
     native.load_state_dict(converted)
 
     artifact = {
-        "version": 2,
-        "artifact": "initial-weights",
+        "schema": "dmpod.initial-weights",
+        "schema_version": 1,
         "model": native.state_dict(),
         "model_args": model_args,
         "source": {
