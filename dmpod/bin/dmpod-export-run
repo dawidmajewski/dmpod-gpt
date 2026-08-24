@@ -41,6 +41,36 @@ def checkpoint_table(artifacts: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def benchmark_sections(benchmarks: dict[str, Any] | None) -> tuple[str, str]:
+    if not benchmarks or not benchmarks.get("results"):
+        return (
+            "No quality benchmark results are available. Run `dmpod-benchmark NAME`.",
+            "",
+        )
+    lines = [
+        "| Benchmark | Language | Metric | Score | Samples |",
+        "| --- | --- | --- | ---: | ---: |",
+    ]
+    links: list[str] = []
+    seen_links: set[tuple[str, str]] = set()
+    order = benchmarks.get("selected") or list(benchmarks["results"])
+    for benchmark_id in order:
+        result = benchmarks["results"][benchmark_id]
+        value = result["primary_value"]
+        score = f"{value:.6f}" if isinstance(value, (int, float)) else str(value)
+        lines.append(
+            f"| {result['name']} | {result['language']} | "
+            f"`{result['primary_metric']}` | {score} | {result['samples']} |"
+        )
+        for link in result.get("links", []):
+            item = (str(link["label"]), str(link["url"]))
+            if item not in seen_links:
+                seen_links.add(item)
+                links.append(f"- [{item[0]}]({item[1]})")
+    references = "Benchmark references:\n\n" + "\n".join(links) if links else ""
+    return "\n".join(lines), references
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export a trained run as Markdown.")
     parser.add_argument("name")
@@ -60,6 +90,7 @@ def main() -> None:
     runtime = load(run_dir / "runtime.json")
     artifacts = load(run_dir / "artifacts.json", required=False)
     wandb = load(run_dir / "wandb.json", required=False)
+    benchmarks = load(run_dir / "benchmarks" / "results.json", required=False)
     output_dir = (args.output_dir or run_dir / "reports").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     template_root = Path(__file__).resolve().parents[1] / "templates"
@@ -132,6 +163,7 @@ def main() -> None:
         ]
     )
     checkpoints = checkpoint_table(artifacts)
+    benchmark_table, benchmark_links = benchmark_sections(benchmarks)
     reproduce = f"dmpod-train {args.name} --resume --tmux"
     context = {
         "schema_version": 1,
@@ -141,6 +173,7 @@ def main() -> None:
         "manifest": manifest,
         "artifacts": artifacts,
         "wandb": wandb,
+        "benchmarks": benchmarks,
     }
     atomic_json(output_dir / "report-context.json", context)
     if args.format in {"all", "readme"}:
@@ -152,6 +185,8 @@ def main() -> None:
             source.substitute(
                 model_name=args.name,
                 results_table=results,
+                benchmark_table=benchmark_table,
+                benchmark_links=benchmark_links,
                 model_table=model_values,
                 training_table=training,
                 data_table=data_values,
@@ -172,6 +207,7 @@ def main() -> None:
                 "- [x] Immutable training configuration saved",
                 "- [x] Final evaluation completed",
                 "- [x] Final checkpoint recorded",
+                f"- [{'x' if benchmarks else ' '}] Quality benchmarks recorded",
             ]
         )
         link = f"[{wandb['url']}]({wandb['url']})" if wandb and wandb.get("url") else "offline"
@@ -180,6 +216,8 @@ def main() -> None:
             source.substitute(
                 summary=f"Adds the trained checkpoint for `{args.name}`.",
                 results_table=results,
+                benchmark_table=benchmark_table,
+                benchmark_links=benchmark_links,
                 reproducibility_checklist=checklist,
                 checkpoint_table=checkpoints,
                 stop_reason=summary["stop_reason"],

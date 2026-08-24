@@ -6,6 +6,12 @@ This model was pretrained with DMPod GPT using the pinned nanoGPT implementation
 
 $results_table
 
+## Benchmarks
+
+$benchmark_table
+
+$benchmark_links
+
 ## Model
 
 $model_table

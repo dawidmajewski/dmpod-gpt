@@ -32,6 +32,10 @@ as a comparison point.
   before producing its first checkpoint.
 - `dmpod-export-run NAME`: generate the trained model README, PR body, and
   machine-readable report context from a completed profile run.
+- `dmpod-benchmark NAME`: interactively select English and Polish quality
+  benchmarks for a trusted native checkpoint. For unattended runs, pass
+  `--benchmarks all|english|polish|ID...`. Results are saved as JSON under the
+  run and included by the next `dmpod-export-run NAME`.
 - `dmpod-wandb-dashboard`: create or update the canonical LR-sweep workspace.
 - `run-benchmarks --model-config PATH`: benchmark an architecture on synthetic
   tokens and append machine-readable JSONL results under `/workspace`.
@@ -60,6 +64,10 @@ Run snapshots are immutable; create a new run instead of editing one in place.
   checkpoint, local `metrics.jsonl`, and `wandb.json`. W&B logging must not be
   silently disabled for profile runs; an explicit user-approved offline run is
   the only exception.
+- After training succeeds, ask the user whether to run quality benchmarks. Do
+  not silently start the full suite because it downloads evaluation datasets
+  and can consume substantial GPU time. If accepted, run `dmpod-benchmark NAME`
+  and refresh the reports with `dmpod-export-run NAME`.
 - For the canonical 125M LR sweep, change only `--max-lr` during the first sweep.
   Keep seeds, hashes, token budget, batch tokens, precision, and eval offsets
   identical.

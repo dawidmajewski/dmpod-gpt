@@ -230,6 +230,13 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         result = self.run_command(str(BIN / "dmpod-smoke-test"), "--help")
         self.assertIn("TinyStories GPU and W&B smoke test", result.stdout)
 
+    def test_quality_benchmark_catalog_does_not_require_a_workspace(self) -> None:
+        result = self.run_command(str(BIN / "dmpod-benchmark"), "--list")
+        self.assertIn("blimp", result.stdout)
+        self.assertIn("arc-challenge", result.stdout)
+        self.assertIn("8tags", result.stdout)
+        self.assertIn("polemo2-out", result.stdout)
+
     def test_setup_writes_environment_only_config_with_private_mode(self) -> None:
         self.initialize_workspace()
         self.setup_environment()
@@ -574,15 +581,60 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         (run / "artifacts.json").write_text(
             json.dumps({"version": 1, "checkpoints": []}), encoding="utf-8"
         )
+        (run / "benchmarks").mkdir()
+        (run / "benchmarks" / "results.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "selected": ["blimp", "8tags"],
+                    "results": {
+                        "blimp": {
+                            "name": "BLiMP",
+                            "language": "English",
+                            "primary_metric": "acc",
+                            "primary_value": 0.51,
+                            "samples": 67000,
+                            "links": [
+                                {
+                                    "label": "BLiMP",
+                                    "url": "https://github.com/alexwarstadt/blimp",
+                                }
+                            ],
+                        },
+                        "8tags": {
+                            "name": "8Tags",
+                            "language": "Polish",
+                            "primary_metric": "accuracy",
+                            "primary_value": 0.25,
+                            "samples": 4372,
+                            "links": [
+                                {
+                                    "label": "8Tags",
+                                    "url": "https://huggingface.co/datasets/sdadas/8tags",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         self.run_command(str(BIN / "dmpod-export-run"), name)
+        readme = (run / "reports" / "README.md").read_text(encoding="utf-8")
         self.assertIn(
             "Final validation loss",
-            (run / "reports" / "README.md").read_text(encoding="utf-8"),
+            readme,
         )
+        self.assertIn("| BLiMP | English | `acc` | 0.510000 | 67000 |", readme)
+        self.assertGreater(readme.index("[BLiMP]"), readme.index("| BLiMP |"))
         self.assertIn(
             "Target token budget completed",
             (run / "reports" / "PR_BODY.md").read_text(encoding="utf-8"),
         )
+        report_context = json.loads(
+            (run / "reports" / "report-context.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(report_context["benchmarks"]["selected"], ["blimp", "8tags"])
 
         (dataset / "train.bin").write_bytes(b"\x01\x00" + bytes(2046))
         changed = self.run_failure(str(BIN / "dmpod-train"), name, "--dry-run")

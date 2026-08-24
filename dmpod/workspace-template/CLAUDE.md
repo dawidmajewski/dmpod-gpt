@@ -4,3 +4,6 @@ Before starting, resuming, or restarting training, verify that W&B online
 logging is connected. If it is not connected or cannot be verified, do not run
 `dmpod-train` until the user explicitly confirms proceeding with local-only or
 offline logging.
+
+After training succeeds, ask whether the user wants quality benchmarks. If the
+answer is yes, use `dmpod-benchmark NAME` and then refresh the exported reports.

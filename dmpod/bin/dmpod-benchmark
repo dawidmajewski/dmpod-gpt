@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_benchmark import (  # noqa: E402
+    BENCHMARKS,
+    BENCHMARK_BY_ID,
+    NanoGPTBackend,
+    evaluate_english,
+    evaluate_polish,
+    format_score,
+    interactive_benchmarks,
+    parse_benchmarks,
+    result_document,
+)
+from dmpod_common import (  # noqa: E402
+    atomic_json,
+    file_sha256,
+    load_environment_config,
+    require_name,
+)
+
+
+def print_catalog() -> None:
+    current = None
+    for benchmark in BENCHMARKS:
+        if benchmark.language != current:
+            current = benchmark.language
+            print(f"{current}:")
+        print(f"  {benchmark.benchmark_id:<15} {benchmark.name}")
+
+
+def checkpoint_for(run_dir: Path, requested: Path | None) -> Path:
+    if requested is not None:
+        path = requested.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
+    for filename in ("ckpt-final.pt", "ckpt-best-val.pt", "ckpt-last.pt"):
+        path = run_dir / "checkpoints" / filename
+        if path.is_file():
+            return path
+    raise FileNotFoundError(f"No final, best-val, or last checkpoint found in {run_dir}")
+
+
+def print_results(selected: list[str], results: dict[str, dict]) -> None:
+    rows = [("Benchmark", "Language", "Metric", "Score", "Samples")]
+    for benchmark_id in selected:
+        result = results[benchmark_id]
+        rows.append(
+            (
+                result["name"],
+                result["language"],
+                result["primary_metric"],
+                format_score(result["primary_value"]),
+                str(result["samples"]),
+            )
+        )
+    widths = [max(len(row[index]) for row in rows) for index in range(5)]
+    for row_index, row in enumerate(rows):
+        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+        if row_index == 0:
+            print("  ".join("-" * width for width in widths))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run language-quality benchmarks on a native DMPod checkpoint."
+    )
+    parser.add_argument("name", nargs="?", help="completed profile run name")
+    parser.add_argument(
+        "--benchmarks",
+        nargs="+",
+        metavar="NAME",
+        help="benchmark IDs, comma-separated IDs, all, english, or polish",
+    )
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "bfloat16", "float16", "float32"),
+        default="auto",
+    )
+    parser.add_argument("--device", help="PyTorch device; defaults to CUDA, then CPU")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="evaluate only this many examples per task (testing only)",
+    )
+    parser.add_argument("--list", action="store_true", help="list benchmark IDs")
+    args = parser.parse_args()
+    if args.list:
+        print_catalog()
+        return
+    if not args.name:
+        parser.error("NAME is required unless --list is used")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    require_name(args.name, "run name")
+    selected = (
+        parse_benchmarks(args.benchmarks)
+        if args.benchmarks
+        else interactive_benchmarks()
+    )
+    environment = load_environment_config()
+    run_dir = Path(environment["runs_root"]) / args.name
+    if not run_dir.is_dir():
+        raise FileNotFoundError(run_dir)
+    checkpoint = checkpoint_for(run_dir, args.checkpoint)
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    print(f"Loading trusted checkpoint: {checkpoint}")
+    backend = NanoGPTBackend(
+        run_dir,
+        checkpoint,
+        device=device,
+        dtype=args.dtype,
+        batch_size=args.batch_size,
+    )
+    results: dict[str, dict] = {}
+    harness = None
+    english = [item for item in selected if BENCHMARK_BY_ID[item].language == "English"]
+    if english:
+        english_results, harness = evaluate_english(backend, english, args.limit)
+        results.update(english_results)
+    for benchmark_id in selected:
+        if BENCHMARK_BY_ID[benchmark_id].language == "Polish":
+            results[benchmark_id] = evaluate_polish(backend, benchmark_id, args.limit)
+    output = (args.output or run_dir / "benchmarks" / "results.json").resolve()
+    document = result_document(
+        run_name=args.name,
+        checkpoint=checkpoint,
+        checkpoint_sha256=file_sha256(checkpoint),
+        backend=backend,
+        selected=selected,
+        results=results,
+        harness=harness,
+        limit=args.limit,
+    )
+    atomic_json(output, document)
+    print_results(selected, results)
+    print(f"Benchmark results written to {output}")
+    print(f"Refresh reports with: dmpod-export-run {args.name}")
+
+
+if __name__ == "__main__":
+    main()

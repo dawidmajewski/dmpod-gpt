@@ -214,6 +214,8 @@ dmpod-train lr-0.001_seed-1337_btok-8192 --tmux
 
 ## Benchmarks
 
+Benchmark training throughput for an architecture on synthetic tokens:
+
 ```bash
 run-benchmarks \
   --model-config configs/models/tiny-gpt.py \
@@ -222,6 +224,30 @@ run-benchmarks \
 
 Results are printed and appended as JSONL to
 `/workspace/benchmarks/results.jsonl` by default.
+
+Evaluate a completed native profile run for language quality:
+
+```bash
+dmpod-benchmark RUN_NAME
+```
+
+The interactive selector offers `All`, `English only`, `Polish only`, and
+`Let me choose`, with separate English and Polish checklists for custom runs.
+For unattended execution, pass benchmark IDs explicitly:
+
+```bash
+dmpod-benchmark RUN_NAME \
+  --benchmarks blimp lambada hellaswag piqa sciq arc-easy arc-challenge \
+  8tags polemo2-in polemo2-out
+```
+
+English evaluation uses the pinned lm-evaluation-harness task definitions.
+The Polish classification tasks use zero-shot, length-normalized candidate
+likelihood and report accuracy plus macro-F1; this is not supervised KLEJ
+fine-tuning. Results are written to `runs/RUN_NAME/benchmarks/results.json`.
+Run `dmpod-export-run RUN_NAME` afterward to add the table and benchmark links
+to the generated README and PR body. `--limit N` is available only for quick
+integration tests and should not be used for reported scores.
 
 ## Storage
 

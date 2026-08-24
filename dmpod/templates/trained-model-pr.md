@@ -6,6 +6,12 @@ $summary
 
 $results_table
 
+## Benchmarks
+
+$benchmark_table
+
+$benchmark_links
+
 ## Reproducibility
 
 $reproducibility_checklist

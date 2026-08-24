@@ -1,7 +1,9 @@
 # PyTorch 2.8.0+cu128 and Triton 3.4.0 come from the pinned RunPod base image.
 datasets==5.0.1
 huggingface_hub==1.28.0
+lm_eval==0.4.12
 numpy==2.1.2
+questionary==2.1.1
 requests==2.34.2
 safetensors==0.8.0
 tiktoken==0.14.0
