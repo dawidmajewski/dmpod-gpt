@@ -79,6 +79,13 @@ def validate_profile(profile: dict[str, Any]) -> None:
         or profile["evaluation"]["val_eval_subset_tokens"] < 1
     ):
         raise ValueError("val_eval_subset_tokens must be a positive integer")
+    checkpoint_interval = profile["checkpoint"].get("max_interval_minutes")
+    if (
+        isinstance(checkpoint_interval, bool)
+        or not isinstance(checkpoint_interval, (int, float))
+        or checkpoint_interval <= 0
+    ):
+        raise ValueError("checkpoint.max_interval_minutes must be positive")
     counts = parameter_counts(model)
     expected = {
         "actual_parameters_total": model["expected_actual_parameters_total"],
@@ -330,6 +337,9 @@ def profile_from_configs(
             "exclude_wandb_upload_from_step_timing": True,
         },
         "checkpoint": {
+            "max_interval_minutes": float(
+                training_values.get("checkpoint_interval_minutes", 60.0)
+            ),
             "save_last_checkpoint": True,
             "save_best_val_checkpoint": True,
             "save_final_checkpoint": True,

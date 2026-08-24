@@ -8,6 +8,7 @@ small set of commands for persistent work under `/workspace`.
 ## Image contents
 
 - RunPod PyTorch 2.8.0 / CUDA 12.8.1 base pinned by digest.
+- DMPod version from `DMPOD_VERSION`, embedded in the image metadata and environment.
 - Official `karpathy/nanoGPT` cloned at the commit in `NANOGPT_REVISION`.
 - The complete `/opt/nanogpt/.git` directory for local history and comparisons.
 - Codex CLI `0.149.0` and Claude Code `2.1.240`, both checksum-verified.
@@ -49,6 +50,10 @@ dmpod-setup --wandb-from-env --hf-from-env --non-interactive
 dmpod-setup --skip-wandb --skip-hf --non-interactive
 ```
 
+`--hf-from-env` verifies `HF_TOKEN` without copying it to `/workspace`. Add
+`--save-hf-token` only when the token should remain available on the attached
+storage after the environment variable is gone.
+
 If a W&B key is entered interactively, setup can save it at
 `/workspace/.dmpod/secrets/wandb.key` with mode `0600`. Environment variable
 `WANDB_API_KEY` always takes precedence. The key is never written to TOML or a
@@ -56,12 +61,13 @@ run manifest. Saving it on a Network Volume is explicit and optional.
 `dmpod-setup` also registers a verified online key with the standard W&B client,
 so `wandb` commands and agent tools use the same authenticated account.
 
-Hugging Face login is optional and uses a hidden `HF_TOKEN` prompt. A valid
-personal token is registered with the standard `huggingface_hub` client under
+Hugging Face login is optional and uses a hidden `HF_TOKEN` prompt. Tokens
+entered interactively, or passed with explicit `--save-hf-token`, are registered
+with the standard `huggingface_hub` client under
 `HF_HOME=/workspace/cache/huggingface`, so `hf`, Transformers, datasets, and
-agent tools reuse it across Pods attached to the same workspace. Tokens are
-verified before they are saved and are never written to DMPod configuration or
-run manifests.
+agent tools reuse them across Pods attached to the same workspace. Environment
+tokens are otherwise only verified and used from the environment. Tokens are
+never written to DMPod configuration or run manifests.
 
 For reusable Pod credentials, create a RunPod secret named `wandb_api_key` and
 map it in the Pod template without putting the value in the template:
@@ -136,8 +142,22 @@ dmpod-train demo --resume
 If a new scratch run fails before producing its first checkpoint, restart it
 explicitly with `dmpod-train demo --restart`. Run configuration snapshots are
 hash-checked before execution and cannot be edited after creation. Checkpoints
-are replaced atomically, saved at each configured evaluation interval by the
-included presets, and saved once more after a normal training-loop exit.
+are replaced atomically. The included profiles refresh `ckpt-last.pt` at each
+configured evaluation and at least once every 60 minutes, while retaining the
+configured best, final, and data-pass checkpoints.
+
+Request a planned interruption without stopping in the middle of an optimizer
+update:
+
+```bash
+dmpod-stop demo
+```
+
+The trainer notices the request at a safe step boundary, refreshes
+`ckpt-last.pt`, writes `state.json` with status `stopped`, and exits cleanly.
+Wait for that status before stopping the Pod, then continue with
+`dmpod-train demo --resume`. `SIGINT` and `SIGTERM` use the same checkpoint-first
+path; an uncatchable process or Pod failure cannot guarantee a final save.
 
 Remote Hugging Face initialization requires an immutable revision and supports
 only GPT-2-compatible models whose architecture matches the model config:
@@ -187,7 +207,9 @@ and that every token ID is below the configured vocabulary size.
 W&B online mode is the default. A run fails before using the GPU if the
 key is unavailable. Explicit offline mode remains available through
 `dmpod-setup --wandb-mode offline`; local `metrics.jsonl`, `summary.json`, and
-checkpoint records are always written.
+checkpoint records are always written. Local periodic checkpoints are not
+uploaded to W&B. A completed online run uploads only the retained `best-val`
+and `final` checkpoint artifacts.
 
 Create the canonical W&B dashboard after setup:
 
@@ -257,11 +279,22 @@ integration tests and should not be used for reported scores.
 - Network Volume data survives Pod termination and can be attached to a new Pod
   in the same data center.
 
+Before training starts, `dmpod-train` prints an estimate for all checkpoints the
+run may retain and the current free space. It warns rather than blocks when the
+volume may be too small, including room for the temporary file required by an
+atomic checkpoint replacement. The default 50 GB volume can be sufficient for
+small runs, but a warning should be resolved by increasing persistent storage
+or removing unused runs before a long training job.
+
 Critical checkpoints should also be backed up outside RunPod.
 
 ## GitHub Actions
 
-`.github/workflows/docker.yml` builds and pushes version tags and manual runs.
+`.github/workflows/docker.yml` builds a test stage, runs the CLI tests and an
+entrypoint workspace smoke test inside the image, and only then builds and
+pushes the final stage. A pushed Git tag must be exactly `v` followed by the
+version in `DMPOD_VERSION`; manual runs may publish development tags such as
+`edge` without changing the release version.
 Configure these repository secrets before enabling publication:
 
 - `DOCKERHUB_USERNAME`

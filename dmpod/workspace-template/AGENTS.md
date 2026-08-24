@@ -18,7 +18,9 @@ as a comparison point.
 
 - `dmpod-setup`: configure storage, caches, and optional W&B and Hugging Face
   access only. It never chooses a model, dataset, checkpoint, or training
-  configuration.
+  configuration. `--hf-from-env` verifies `HF_TOKEN` without persisting it;
+  combine it with `--save-hf-token` only when the user explicitly wants the
+  token stored on the attached workspace.
 - `dmpod-prepare-data shakespeare_char|shakespeare`: run an upstream preset.
 - `dmpod-prepare-data existing NAME PATH`: register existing uint16 binaries
   from the attached volume without copying them.
@@ -30,6 +32,8 @@ as a comparison point.
 - `dmpod-train NAME`: start a new run. Use `dmpod-train NAME --resume` to
   continue from a checkpoint, or `--restart` only when a scratch run failed
   before producing its first checkpoint.
+- `dmpod-stop NAME`: request a checkpoint and clean stop at the next safe
+  training-step boundary. Resume the stopped run with `dmpod-train NAME --resume`.
 - `dmpod-export-run NAME`: generate the trained model README, PR body, and
   machine-readable report context from a completed run.
 - `dmpod-benchmark NAME`: interactively select English and Polish quality
@@ -58,12 +62,21 @@ Run snapshots are immutable; create a new run instead of editing one in place.
   shell processes.
 - After starting training, report both `tmux attach -t dmpod-NAME` and
   `tail -f /workspace/runs/NAME/logs/training.log` to the user.
+- For a planned interruption, use `dmpod-stop NAME` and wait until `state.json`
+  reports `stopped` before stopping the Pod. Do not use `kill -9`; `SIGINT` and
+  `SIGTERM` also request a checkpoint-first stop but cannot protect against an
+  uncatchable process or Pod failure.
 - Use a descriptive tmux name for long dataset or conversion jobs and report the
   exact attach command immediately after launch.
+- Read the checkpoint storage estimate printed before training. If it warns,
+  resolve the capacity risk before a long run by increasing persistent storage
+  or removing unused runs; do not assume the default 50 GB is sufficient.
 - Before declaring success, check `state.json`, `summary.json`, the final
   checkpoint, local `metrics.jsonl`, and `wandb.json`. W&B logging must not be
   silently disabled for any run; an explicit user-approved offline run is
   the only exception.
+- Expect periodic and `latest` checkpoints to remain local. A completed online
+  run uploads only the retained `best-val` and `final` checkpoints to W&B.
 - After training succeeds, ask the user whether to run quality benchmarks. Do
   not silently start the full suite because it downloads evaluation datasets
   and can consume substantial GPU time. If accepted, run `dmpod-benchmark NAME`

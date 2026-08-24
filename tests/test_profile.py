@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import types
@@ -47,6 +48,15 @@ class ProfileTests(unittest.TestCase):
         }
         self.assertAlmostEqual(learning_rate(optimizer, 0, 10), 1e-4)
         self.assertAlmostEqual(learning_rate(optimizer, 990, 10), 1e-4)
+
+    def test_bundled_profiles_limit_checkpoint_interval(self) -> None:
+        for name in ("minimal-en-125m", "smoke-tinystories"):
+            profile = load_profile(name)[1]
+            self.assertEqual(profile["checkpoint"]["max_interval_minutes"], 60)
+            validate_profile(profile)
+        profile["checkpoint"]["max_interval_minutes"] = 0
+        with self.assertRaisesRegex(ValueError, "max_interval_minutes"):
+            validate_profile(profile)
 
     def test_evaluation_thresholds_include_passes_and_final(self) -> None:
         config = {
@@ -183,12 +193,26 @@ class ProfileTests(unittest.TestCase):
                 )
                 checkpoint = run_dir / "checkpoint.pt"
                 checkpoint.write_bytes(b"checkpoint")
-                reporter.artifact(
+                reporter.record_checkpoint(
                     checkpoint,
-                    ["latest", "final"],
+                    ["latest"],
                     {"tokens_seen": 8192},
-                    upload=True,
                 )
+                self.assertEqual(fake_run.artifacts, [])
+                checkpoint.write_bytes(b"updated checkpoint")
+                reporter.record_checkpoint(
+                    checkpoint,
+                    ["latest"],
+                    {"tokens_seen": 16384},
+                )
+                artifact_records = json.loads(
+                    (run_dir / "artifacts.json").read_text(encoding="utf-8")
+                )["checkpoints"]
+                self.assertEqual(len(artifact_records), 1)
+                self.assertEqual(
+                    artifact_records[0]["metadata"]["tokens_seen"], 16384
+                )
+                reporter.upload_recorded_checkpoint(checkpoint, ["final"])
                 reporter.summary({"final_val_loss": 3.9})
                 reporter.finish()
                 self.assertTrue((run_dir / "metrics.jsonl").is_file())
@@ -198,7 +222,7 @@ class ProfileTests(unittest.TestCase):
                     fake_run.defined,
                 )
                 self.assertEqual(fake_run.logged[0]["train/loss"], 4.0)
-                self.assertEqual(fake_run.artifacts[0][1], ["latest", "final"])
+                self.assertEqual(fake_run.artifacts[0][1], ["final"])
                 self.assertEqual(fake_run.summary["final_val_loss"], 3.9)
         finally:
             if previous is None:

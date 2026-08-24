@@ -78,6 +78,7 @@
     "exclude_wandb_upload_from_step_timing": true
   },
   "checkpoint": {
+    "max_interval_minutes": 60,
     "save_last_checkpoint": true,
     "save_best_val_checkpoint": true,
     "save_final_checkpoint": true,

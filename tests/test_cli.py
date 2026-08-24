@@ -16,6 +16,8 @@ BANNER = PROJECT / "dmpod" / "banner.txt"
 SHELL_BANNER = PROJECT / "dmpod" / "shell-banner.sh"
 ENTRYPOINT = PROJECT / "scripts" / "container-entrypoint.sh"
 TEMPLATE = PROJECT / "dmpod" / "workspace-template"
+VERSION_FILE = PROJECT / "DMPOD_VERSION"
+RUNPOD_TEMPLATE = PROJECT / "runpod" / "template.json.example"
 
 
 class DMPodCliTests(unittest.TestCase):
@@ -226,6 +228,12 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         after_setup = self.run_command("/bin/bash", str(SHELL_BANNER))
         self.assertNotIn('Run "dmpod-setup"', after_setup.stdout)
 
+    def test_release_version_matches_runpod_template(self) -> None:
+        version = VERSION_FILE.read_text(encoding="utf-8").strip()
+        template = json.loads(RUNPOD_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertTrue(version)
+        self.assertEqual(template["imageName"].rsplit(":", 1)[-1], f"v{version}")
+
     def test_smoke_test_help_does_not_require_a_configured_workspace(self) -> None:
         result = self.run_command(str(BIN / "dmpod-smoke-test"), "--help")
         self.assertIn("TinyStories GPU and W&B smoke test", result.stdout)
@@ -350,6 +358,36 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         )
         self.assertIn("token source: cached", reused.stdout)
 
+    def test_setup_does_not_persist_huggingface_environment_token_by_default(self) -> None:
+        self.initialize_workspace()
+        credential = secrets.token_hex(24)
+        self.install_fake_huggingface(credential)
+        self.env["HF_TOKEN"] = credential
+
+        result = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--skip-wandb",
+            "--hf-from-env",
+            "--non-interactive",
+        )
+
+        token_path = Path(self.env["HF_HOME"]) / "token"
+        self.assertFalse(token_path.exists())
+        self.assertIn("token source: environment; not saved", result.stdout)
+        self.assertNotIn(credential, result.stdout)
+        self.assertNotIn(credential, result.stderr)
+
+        saved = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--skip-wandb",
+            "--hf-from-env",
+            "--save-hf-token",
+            "--non-interactive",
+        )
+        self.assertTrue(token_path.is_file())
+        self.assertEqual(stat.S_IMODE(token_path.stat().st_mode), 0o600)
+        self.assertIn("token source: environment; saved", saved.stdout)
+
     def test_setup_does_not_save_rejected_huggingface_token(self) -> None:
         self.initialize_workspace()
         self.install_fake_huggingface(secrets.token_hex(24))
@@ -448,9 +486,13 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertTrue((run / "sources" / "trainer.py").is_file())
         self.assertTrue((run / "sources" / "tokenizer.json").is_file())
         self.assertTrue((run / "eval" / "val_offsets.npy").is_file())
+        dry_run = self.run_command(
+            str(BIN / "dmpod-train"), "test-run", "--dry-run"
+        )
+        self.assertIn("trainer.py", dry_run.stdout)
         self.assertIn(
-            "trainer.py",
-            self.run_command(str(BIN / "dmpod-train"), "test-run", "--dry-run").stdout,
+            "Checkpoint storage estimate:",
+            dry_run.stdout,
         )
 
         tmux_arguments = self.install_fake_tmux()
@@ -463,6 +505,26 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertIn("2>&1 | tee -a", shell_command)
         self.assertIn("logs/training.log", shell_command)
         self.assertIn("tmux attach -t dmpod-test-run", launched.stdout)
+
+        (run / "state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "dmpod.run-state",
+                    "schema_version": 1,
+                    "status": "running",
+                    "attempts": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        stopped = self.run_command(str(BIN / "dmpod-stop"), "test-run")
+        stop_request = json.loads(
+            (run / "stop-request.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(stop_request["schema"], "dmpod.stop-request")
+        self.assertEqual(stop_request["attempt"], 1)
+        self.assertIn("Safe stop requested", stopped.stdout)
+        (run / "stop-request.json").unlink()
 
         (run / "state.json").write_text(
             json.dumps(

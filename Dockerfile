@@ -1,8 +1,8 @@
-FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851 AS runtime
 
 ARG NANOGPT_REPOSITORY=https://github.com/karpathy/nanoGPT.git
 ARG NANOGPT_REVISION=3adf61e154c3fe3fca428ad6bc3818b27a3b8291
-ARG DMPOD_VERSION=1.1.0
+ARG DMPOD_VERSION
 ARG CODEX_VERSION=0.149.0
 ARG CODEX_SHA256=1c08ba262820b78d49ea7a93f326b6b430b72e5fe46830e433edef12e5123244
 ARG CLAUDE_VERSION=2.1.240
@@ -16,7 +16,8 @@ LABEL org.opencontainers.image.title="dmpod-gpt" \
       io.openai.codex.version="${CODEX_VERSION}" \
       io.anthropic.claude-code.version="${CLAUDE_VERSION}"
 
-ENV PYTHONUNBUFFERED=1 \
+ENV DMPOD_VERSION=${DMPOD_VERSION} \
+    PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/workspace/cache/huggingface \
     HF_HUB_CACHE=/workspace/cache/huggingface/hub \
@@ -62,8 +63,11 @@ RUN python -m pip install --no-cache-dir --index-url https://pypi.org/simple \
     python -m pip check
 
 COPY dmpod/ /opt/dmpod/
+COPY DMPOD_VERSION /opt/dmpod/VERSION
 COPY scripts/container-entrypoint.sh /usr/local/bin/dmpod-entrypoint
-RUN chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
+RUN test -n "${DMPOD_VERSION}" && \
+    test "$(tr -d '[:space:]' < /opt/dmpod/VERSION)" = "${DMPOD_VERSION}" && \
+    chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
     git -C /opt/nanogpt apply --check /opt/dmpod/patches/nanogpt-atomic-checkpoints.patch && \
     for command in /opt/dmpod/bin/*; do \
       ln -s "$command" "/usr/local/bin/$(basename "$command")"; \
@@ -78,3 +82,17 @@ RUN chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/dmpod-entrypoint"]
 CMD ["/start.sh"]
+
+FROM runtime AS test
+COPY tests/ /tmp/dmpod-source/tests/
+COPY dmpod/ /tmp/dmpod-source/dmpod/
+COPY scripts/ /tmp/dmpod-source/scripts/
+COPY runpod/ /tmp/dmpod-source/runpod/
+COPY DMPOD_VERSION /tmp/dmpod-source/DMPOD_VERSION
+RUN cd /tmp/dmpod-source && python -m unittest discover -s tests -v && \
+    DMPOD_WORKSPACE=/tmp/dmpod-smoke-workspace \
+      dmpod-entrypoint /bin/bash -c \
+      'test -x /start.sh && test -d .git && test -f AGENTS.md && dmpod-setup --wandb-mode offline --skip-hf --non-interactive' && \
+    rm -rf /tmp/dmpod-source /tmp/dmpod-smoke-workspace
+
+FROM runtime AS final

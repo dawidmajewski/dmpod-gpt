@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from dmpod_common import (  # noqa: E402
+    atomic_json,
+    load_environment_config,
+    load_json,
+    require_name,
+)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Request a safe checkpoint and stop for an active DMPod run."
+    )
+    parser.add_argument("name")
+    args = parser.parse_args()
+    require_name(args.name, "run name")
+    environment = load_environment_config()
+    run_dir = Path(environment["runs_root"]) / args.name
+    if not (run_dir / "manifest.json").is_file():
+        raise FileNotFoundError(f"Unknown training run: {run_dir}")
+    state_path = run_dir / "state.json"
+    if not state_path.is_file():
+        raise RuntimeError(f"Run has not started: {args.name}")
+    state = load_json(state_path)
+    if state.get("status") != "running":
+        raise RuntimeError(
+            f"Run {args.name} is not active; current status: {state.get('status')}"
+        )
+    request_path = run_dir / "stop-request.json"
+    atomic_json(
+        request_path,
+        {
+            "schema": "dmpod.stop-request",
+            "schema_version": 1,
+            "attempt": state["attempts"],
+            "requested_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        },
+    )
+    print(f"Safe stop requested for {args.name}")
+    print(f"The trainer will checkpoint after a safe step boundary: {request_path}")
+
+
+if __name__ == "__main__":
+    main()

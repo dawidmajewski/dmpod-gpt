@@ -21,8 +21,10 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-class PreemptedError(RuntimeError):
-    pass
+class GracefulStop(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def now() -> str:
@@ -158,6 +160,7 @@ def flatten_wandb_config(
         "save_best_val_checkpoint": checkpoint["save_best_val_checkpoint"],
         "save_final_checkpoint": checkpoint["save_final_checkpoint"],
         "save_at_data_passes": checkpoint["save_at_data_passes"],
+        "checkpoint_max_interval_minutes": checkpoint["max_interval_minutes"],
         "log_wandb_artifacts": checkpoint["log_wandb_artifacts"],
     }
     values.update(runtime)
@@ -228,12 +231,11 @@ class Reporter:
             for key, value in values.items():
                 self.run.summary[key] = value
 
-    def artifact(
+    def record_checkpoint(
         self,
         checkpoint: Path,
         aliases: list[str],
         metadata: dict[str, Any],
-        upload: bool,
     ) -> None:
         record = {
             "timestamp": now(),
@@ -247,18 +249,36 @@ class Reporter:
             if self.artifacts_path.is_file()
             else {"version": 1, "checkpoints": []}
         )
+        existing["checkpoints"] = [
+            item
+            for item in existing["checkpoints"]
+            if item.get("path") != record["path"]
+        ]
         existing["checkpoints"].append(record)
         atomic_json(self.artifacts_path, existing)
-        if self.run is not None and upload:
-            import wandb
 
-            artifact = wandb.Artifact(
-                f"{self.run.id}-checkpoint",
-                type="model",
-                metadata=metadata,
-            )
-            artifact.add_file(str(checkpoint), name="checkpoint.pt")
-            self.run.log_artifact(artifact, aliases=aliases)
+    def upload_recorded_checkpoint(self, checkpoint: Path, aliases: list[str]) -> None:
+        if self.run is None or os.environ.get("WANDB_MODE", "online") != "online":
+            return
+        records = json.loads(self.artifacts_path.read_text(encoding="utf-8"))[
+            "checkpoints"
+        ]
+        relative = str(checkpoint.relative_to(self.run_dir))
+        record = next(
+            (item for item in records if item.get("path") == relative),
+            None,
+        )
+        if record is None or file_sha256(checkpoint) != record["sha256"]:
+            raise RuntimeError(f"Checkpoint record is missing or stale: {checkpoint}")
+        import wandb
+
+        artifact = wandb.Artifact(
+            f"{self.run.id}-checkpoint",
+            type="model",
+            metadata=record["metadata"],
+        )
+        artifact.add_file(str(checkpoint), name="checkpoint.pt")
+        self.run.log_artifact(artifact, aliases=aliases)
 
     def finish(self, exit_code: int = 0) -> None:
         if self.run is not None:
@@ -490,26 +510,22 @@ def save_checkpoint(
             os.replace(temporary, last_path)
         finally:
             temporary.unlink(missing_ok=True)
-        alias_paths: list[Path] = []
+        saved_paths = [(last_path, ["latest"])]
         for alias in aliases:
             if alias == "latest":
                 continue
             path = checkpoint_dir / f"ckpt-{alias}.pt"
             atomic_copy(last_path, path)
-            alias_paths.append(path)
-        artifact_path = alias_paths[-1] if alias_paths else last_path
+            saved_paths.append((path, [alias]))
         if reporter is not None:
-            reporter.artifact(
-                artifact_path,
-                aliases,
-                {
-                    "update_step": progress["update_step"],
-                    "tokens_seen": progress["tokens_seen"],
-                    "data_pass_equivalent": progress["data_pass_equivalent"],
-                    "best_val_loss": best_val_loss,
-                },
-                upload=bool(config["checkpoint"]["log_wandb_artifacts"]),
-            )
+            metadata = {
+                "update_step": progress["update_step"],
+                "tokens_seen": progress["tokens_seen"],
+                "data_pass_equivalent": progress["data_pass_equivalent"],
+                "best_val_loss": best_val_loss,
+            }
+            for path, path_aliases in saved_paths:
+                reporter.record_checkpoint(path, path_aliases, metadata)
     if dist.is_initialized():
         dist.barrier()
 
@@ -721,6 +737,11 @@ def main() -> None:
         else None
     )
 
+    checkpoint_config = config["checkpoint"]
+    pass_checkpoint_aliases = {
+        f"pass-{format(float(value), 'g')}"
+        for value in checkpoint_config["save_at_data_passes"]
+    }
     thresholds = event_thresholds(config)
     evaluated_thresholds: set[int] = set()
     min_val_loss = best_val_loss
@@ -729,7 +750,11 @@ def main() -> None:
     final_val_loss = math.nan
     total_training_seconds = 0.0
     started = time.monotonic()
+    last_checkpoint_at = started
+    last_checkpoint_update = -1
     last_evaluation_update = -1
+    signal_action = 0
+    stop_request_path = run_dir / "stop-request.json"
     window_loss_sum = torch.zeros((), dtype=torch.float64, device=device)
     window_token_count = torch.zeros((), dtype=torch.float64, device=device)
     window_grad_sum = torch.zeros((), dtype=torch.float64, device=device)
@@ -737,6 +762,26 @@ def main() -> None:
     window_clip_count = torch.zeros((), dtype=torch.float64, device=device)
     window_steps = torch.zeros((), dtype=torch.float64, device=device)
     window_duration = torch.zeros((), dtype=torch.float64, device=device)
+
+    def save_local_checkpoint(aliases: list[str]) -> None:
+        nonlocal last_checkpoint_at, last_checkpoint_update
+        save_checkpoint(
+            run_dir=run_dir,
+            base_model=base_model,
+            optimizer=optimizer,
+            scaler=scaler,
+            config=config,
+            progress=progress,
+            best_val_loss=best_val_loss,
+            data_generator=data_generator,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+            reporter=reporter,
+            aliases=list(dict.fromkeys(aliases)),
+        )
+        last_checkpoint_at = time.monotonic()
+        last_checkpoint_update = int(progress["update_step"])
 
     def evaluate(reasons: set[str]) -> tuple[float, float]:
         nonlocal best_val_loss, min_val_loss, tokens_at_min, last_evaluation_update
@@ -785,26 +830,21 @@ def main() -> None:
             )
         aliases = ["latest"]
         aliases.extend(
-            sorted(reason for reason in reasons if reason.startswith("pass-"))
+            sorted(reason for reason in reasons if reason in pass_checkpoint_aliases)
         )
-        if is_best and progress["update_step"] > 0:
+        if (
+            is_best
+            and progress["update_step"] > 0
+            and checkpoint_config["save_best_val_checkpoint"]
+        ):
             aliases.append("best-val")
+        if (
+            reasons & {"final", "final-budget"}
+            and checkpoint_config["save_final_checkpoint"]
+        ):
+            aliases.append("final")
         if progress["update_step"] > 0:
-            save_checkpoint(
-                run_dir=run_dir,
-                base_model=base_model,
-                optimizer=optimizer,
-                scaler=scaler,
-                config=config,
-                progress=progress,
-                best_val_loss=best_val_loss,
-                data_generator=data_generator,
-                rank=rank,
-                world_size=world_size,
-                device=device,
-                reporter=reporter,
-                aliases=list(dict.fromkeys(aliases)),
-            )
+            save_local_checkpoint(aliases)
         last_evaluation_update = int(progress["update_step"])
         return train_loss, val_loss
 
@@ -840,23 +880,64 @@ def main() -> None:
             / 1024**3
             if device.type == "cuda"
             else 0.0,
-            "best_checkpoint_alias": "best-val",
-            "final_checkpoint_alias": "final" if stop_reason == "completed" else None,
+            "best_checkpoint_alias": "best-val"
+            if (run_dir / "checkpoints" / "ckpt-best-val.pt").is_file()
+            else None,
+            "final_checkpoint_alias": "final"
+            if stop_reason == "completed"
+            and (run_dir / "checkpoints" / "ckpt-final.pt").is_file()
+            else None,
             "stop_reason": stop_reason,
             "exit_code": exit_code,
         }
         reporter.summary(values)
 
-    def signal_handler(_signum: int, _frame: Any) -> None:
-        raise PreemptedError("Training process received a termination signal")
+    def signal_handler(signum: int, _frame: Any) -> None:
+        nonlocal signal_action
+        signal_action = max(signal_action, 3 if signum == signal.SIGTERM else 2)
+
+    def requested_control_action() -> int:
+        action = signal_action
+        if master:
+            if stop_request_path.is_file():
+                try:
+                    request = json.loads(
+                        stop_request_path.read_text(encoding="utf-8")
+                    )
+                    state = json.loads(
+                        (run_dir / "state.json").read_text(encoding="utf-8")
+                    )
+                    valid_request = (
+                        request.get("schema") == "dmpod.stop-request"
+                        and request.get("schema_version") == 1
+                        and request.get("attempt") == state.get("attempts")
+                    )
+                except (OSError, TypeError, ValueError):
+                    valid_request = False
+                if valid_request:
+                    action = max(action, 2)
+                else:
+                    stop_request_path.unlink(missing_ok=True)
+            if (
+                action == 0
+                and time.monotonic() - last_checkpoint_at
+                >= float(checkpoint_config["max_interval_minutes"]) * 60
+            ):
+                action = 1
+        action_tensor = torch.tensor(action, dtype=torch.int64, device=device)
+        if dist.is_initialized():
+            dist.all_reduce(action_tensor, op=dist.ReduceOp.MAX)
+        return int(action_tensor.item())
 
     signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
     exit_code = 0
     try:
         if config["evaluation"]["eval_at_start"] and progress["tokens_seen"] == 0:
             final_train_loss, final_val_loss = evaluate({"start"})
         target_updates = int(config["batch"]["target_update_steps"])
         log_interval = int(config["logging"]["train_log_interval_steps"])
+        control_interval = min(log_interval, 10)
         while progress["update_step"] < target_updates:
             lr = learning_rate(
                 config["optimizer"], progress["tokens_seen"], effective_tokens
@@ -988,34 +1069,53 @@ def main() -> None:
             if crossed:
                 final_train_loss, final_val_loss = evaluate(crossed)
 
+            if (
+                progress["update_step"] < target_updates
+                and progress["train_step"] % control_interval == 0
+            ):
+                action = requested_control_action()
+                if action >= 2:
+                    if last_checkpoint_update != progress["update_step"]:
+                        save_local_checkpoint(["latest"])
+                    if master:
+                        stop_request_path.unlink(missing_ok=True)
+                    reason = "preempted" if action == 3 else "manual"
+                    raise GracefulStop(reason)
+                if action == 1:
+                    save_local_checkpoint(["latest"])
+
         if (
             config["evaluation"]["final_eval_required"]
             and last_evaluation_update != progress["update_step"]
         ):
             final_train_loss, final_val_loss = evaluate({"final"})
-        save_checkpoint(
-            run_dir=run_dir,
-            base_model=base_model,
-            optimizer=optimizer,
-            scaler=scaler,
-            config=config,
-            progress=progress,
-            best_val_loss=best_val_loss,
-            data_generator=data_generator,
-            rank=rank,
-            world_size=world_size,
-            device=device,
-            reporter=reporter,
-            aliases=["latest", "final"],
-        )
+        if master:
+            stop_request_path.unlink(missing_ok=True)
+        if (
+            master
+            and reporter is not None
+            and checkpoint_config["log_wandb_artifacts"]
+        ):
+            for alias in ("best-val", "final"):
+                checkpoint_path = run_dir / "checkpoints" / f"ckpt-{alias}.pt"
+                if checkpoint_path.is_file():
+                    try:
+                        reporter.upload_recorded_checkpoint(
+                            checkpoint_path, [alias]
+                        )
+                    except Exception as error:
+                        print(
+                            f"Warning: W&B {alias} checkpoint upload failed: "
+                            f"{type(error).__name__}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
         write_partial_summary("completed", 0)
+    except GracefulStop as stop:
+        write_partial_summary(stop.reason, 0)
     except KeyboardInterrupt:
         exit_code = 130
         write_partial_summary("manual", exit_code)
-        raise
-    except PreemptedError:
-        exit_code = 143
-        write_partial_summary("preempted", exit_code)
         raise
     except torch.cuda.OutOfMemoryError:
         exit_code = 137

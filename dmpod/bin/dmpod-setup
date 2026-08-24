@@ -45,12 +45,13 @@ def verify_wandb_key(key: str) -> str:
     return str(entity)
 
 
-def login_huggingface(token: str) -> str:
+def configure_huggingface(token: str, save: bool) -> str:
     from huggingface_hub import HfApi, login
 
     try:
-        login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
         account = HfApi(token=token).whoami()
+        if save:
+            login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
     except Exception as error:
         raise SystemExit(
             "Hugging Face rejected the configured token; create a current personal "
@@ -74,12 +75,15 @@ def main() -> None:
     hf_group = parser.add_mutually_exclusive_group()
     hf_group.add_argument("--skip-hf", action="store_true")
     hf_group.add_argument("--hf-from-env", action="store_true")
+    parser.add_argument("--save-hf-token", action="store_true")
     parser.add_argument("--save-wandb-key", action="store_true")
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-entity")
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"))
     parser.add_argument("--non-interactive", action="store_true")
     args = parser.parse_args()
+    if args.skip_hf and args.save_hf_token:
+        parser.error("--save-hf-token cannot be combined with --skip-hf")
 
     existing = load_environment_config(required=False)
     existing_wandb = existing.get("wandb", {})
@@ -182,6 +186,7 @@ def main() -> None:
 
     hf_username = ""
     hf_source = "none"
+    hf_saved = False
     if not args.skip_hf:
         from huggingface_hub import get_token
 
@@ -206,7 +211,8 @@ def main() -> None:
             if hf_token:
                 hf_source = "interactive"
         if hf_token:
-            hf_username = login_huggingface(hf_token)
+            hf_saved = hf_source == "interactive" or args.save_hf_token
+            hf_username = configure_huggingface(hf_token, save=hf_saved)
 
     config = {
         "version": 1,
@@ -226,7 +232,11 @@ def main() -> None:
     print(f"nanoGPT workspace: {nanogpt_root()}")
     print(f"W&B mode: {mode}; key source: {key_source}")
     if hf_username:
-        print(f"Hugging Face: connected as {hf_username}; token source: {hf_source}")
+        persistence = "saved" if hf_saved else "not saved"
+        print(
+            f"Hugging Face: connected as {hf_username}; token source: {hf_source}; "
+            f"{persistence}"
+        )
     else:
         print("Hugging Face: not configured")
 
