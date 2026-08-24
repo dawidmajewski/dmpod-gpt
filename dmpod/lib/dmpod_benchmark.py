@@ -207,6 +207,21 @@ class TextTokenizer:
 
             encoding = tiktoken.get_encoding(definition["encoding"])
             self._encode = encoding.encode_ordinary
+        elif definition.get("implementation") == "characters":
+            vocabulary = definition.get("vocabulary")
+            if not isinstance(vocabulary, dict) or not vocabulary:
+                raise ValueError("Character tokenizer is missing its vocabulary")
+
+            def encode_characters(text: str) -> list[int]:
+                try:
+                    return [int(vocabulary[character]) for character in text]
+                except KeyError as error:
+                    raise ValueError(
+                        f"Tokenizer {self.name} cannot encode character "
+                        f"{error.args[0]!r}"
+                    ) from error
+
+            self._encode = encode_characters
         else:
             from tokenizers import Tokenizer
 
@@ -239,7 +254,7 @@ class NanoGPTBackend:
             weights_only=False,
         )
         if checkpoint.get("version") != 2:
-            raise ValueError("Quality benchmarks require a native version 2 checkpoint")
+            raise ValueError("Unsupported checkpoint format; create a new DMPod run")
         model_args = checkpoint["model_args"]
         self.block_size = int(model_args["block_size"])
         self.vocab_size = int(model_args["vocab_size"])

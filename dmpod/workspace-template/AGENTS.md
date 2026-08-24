@@ -11,7 +11,7 @@ as a comparison point.
 - Do not print or commit `WANDB_API_KEY`, `HF_TOKEN`, or agent credentials.
 - Treat checkpoints loaded with `torch.load` as trusted executable inputs.
 - Do not overwrite an existing run. Create a new named run instead.
-- Never run a profile with `python train.py`. Profile runs must go through
+- Never run DMPod training with `python train.py`. All runs must go through
   `dmpod-create-training` and `dmpod-train` so provenance and metrics are saved.
 
 ## Commands
@@ -26,14 +26,14 @@ as a comparison point.
   a custom dataset preparation script. The `datasets` and `tiktoken` packages
   are already installed.
 - `dmpod-create-training`: snapshot model/training configs and select scratch,
-  a GPT-2-compatible Hugging Face model, or a trusted native checkpoint.
+  a GPT-2-compatible Hugging Face model, or a trusted DMPod checkpoint.
 - `dmpod-train NAME`: start a new run. Use `dmpod-train NAME --resume` to
   continue from a checkpoint, or `--restart` only when a scratch run failed
   before producing its first checkpoint.
 - `dmpod-export-run NAME`: generate the trained model README, PR body, and
-  machine-readable report context from a completed profile run.
+  machine-readable report context from a completed run.
 - `dmpod-benchmark NAME`: interactively select English and Polish quality
-  benchmarks for a trusted native checkpoint. For unattended runs, pass
+  benchmarks for a trusted DMPod checkpoint. For unattended runs, pass
   `--benchmarks all|english|polish|ID...`. Results are saved as JSON under the
   run and included by the next `dmpod-export-run NAME`.
 - `dmpod-wandb-dashboard`: create or update the canonical LR-sweep workspace.
@@ -62,7 +62,7 @@ Run snapshots are immutable; create a new run instead of editing one in place.
   exact attach command immediately after launch.
 - Before declaring success, check `state.json`, `summary.json`, the final
   checkpoint, local `metrics.jsonl`, and `wandb.json`. W&B logging must not be
-  silently disabled for profile runs; an explicit user-approved offline run is
+  silently disabled for any run; an explicit user-approved offline run is
   the only exception.
 - After training succeeds, ask the user whether to run quality benchmarks. Do
   not silently start the full suite because it downloads evaluation datasets

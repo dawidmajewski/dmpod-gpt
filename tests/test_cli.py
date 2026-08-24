@@ -431,13 +431,23 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         )
         run = self.workspace / "runs" / "test-run"
         manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+        resolved = json.loads(
+            (run / "resolved-config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["version"], 2)
         self.assertEqual(manifest["source"]["type"], "scratch")
-        self.assertEqual(manifest["architecture"]["n_head"], 2)
-        self.assertTrue((run / "model.py").is_file())
-        self.assertTrue((run / "training.py").is_file())
-        self.assertTrue((run / "runtime.py").is_file())
+        self.assertEqual(resolved["model"]["n_head"], 2)
+        self.assertEqual(resolved["model"]["vocab_size"], 50304)
+        self.assertEqual(resolved["batch"]["target_update_steps"], 600000)
+        self.assertEqual(resolved["evaluation"]["val_evaluation_mode"], "fixed_subset")
+        self.assertTrue((run / "sources" / "model-config.py").is_file())
+        self.assertTrue((run / "sources" / "training-config.py").is_file())
+        self.assertTrue((run / "sources" / "model.py").is_file())
+        self.assertTrue((run / "sources" / "trainer.py").is_file())
+        self.assertTrue((run / "sources" / "tokenizer.json").is_file())
+        self.assertTrue((run / "eval" / "val_offsets.npy").is_file())
         self.assertIn(
-            "Training command:",
+            "trainer.py",
             self.run_command(str(BIN / "dmpod-train"), "test-run", "--dry-run").stdout,
         )
 
@@ -453,20 +463,65 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertIn("tmux attach -t dmpod-test-run", launched.stdout)
 
         (run / "state.json").write_text(
-            json.dumps({"version": 1, "status": "failed", "attempts": 1}),
+            json.dumps({"version": 2, "status": "failed", "attempts": 1}),
             encoding="utf-8",
         )
         restarted = self.run_command(
             str(BIN / "dmpod-train"), "test-run", "--restart", "--dry-run"
         )
-        self.assertIn("--init_from=scratch", restarted.stdout)
+        self.assertIn("trainer.py", restarted.stdout)
 
-        with (run / "training.py").open("a", encoding="utf-8") as config:
+        import torch
+
+        source_checkpoint = self.root / "source-checkpoint.pt"
+        torch.save(
+            {
+                "version": 2,
+                "model": {},
+                "model_args": resolved["model"],
+                "full_training_config": resolved,
+                "tokenizer_reference": manifest["dataset"]["tokenizer"],
+            },
+            source_checkpoint,
+        )
+        self.run_command(
+            str(BIN / "dmpod-create-training"),
+            "continued",
+            "--model-config",
+            str(model),
+            "--training-config",
+            str(training),
+            "--source",
+            "checkpoint",
+            "--checkpoint",
+            str(source_checkpoint),
+        )
+        continued = self.workspace / "runs" / "continued"
+        continued_manifest = json.loads(
+            (continued / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(continued_manifest["version"], 2)
+        self.assertEqual(continued_manifest["source"]["type"], "checkpoint")
+        self.assertIn(
+            "--init-from",
+            self.run_command(
+                str(BIN / "dmpod-train"), "continued", "--dry-run"
+            ).stdout,
+        )
+        source_checkpoint.write_bytes(b"changed")
+        changed_checkpoint = self.run_failure(
+            str(BIN / "dmpod-train"), "continued", "--dry-run"
+        )
+        self.assertIn("Source checkpoint changed", changed_checkpoint.stderr)
+
+        with (run / "sources" / "training-config.py").open(
+            "a", encoding="utf-8"
+        ) as config:
             config.write("learning_rate=1e-4\n")
         changed = self.run_failure(
             str(BIN / "dmpod-train"), "test-run", "--restart", "--dry-run"
         )
-        self.assertIn("Run config changed after creation", changed.stderr)
+        self.assertIn("Immutable run file changed", changed.stderr)
 
     def create_profile_dataset(self) -> Path:
         dataset = self.workspace / "nanogpt" / "data" / "tinystories-smoke"

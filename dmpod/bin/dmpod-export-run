@@ -84,7 +84,7 @@ def main() -> None:
     run_dir = Path(environment["runs_root"]) / args.name
     manifest = load(run_dir / "manifest.json")
     if manifest.get("version") != 2:
-        raise ValueError("Markdown export requires a version 2 run")
+        raise ValueError("Unsupported run format; create a new DMPod run")
     config = load(run_dir / "resolved-config.json")
     summary = load(run_dir / "summary.json")
     runtime = load(run_dir / "runtime.json")

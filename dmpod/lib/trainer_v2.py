@@ -138,8 +138,10 @@ def flatten_wandb_config(
         "eval_at_data_passes": evaluation["eval_at_data_passes"],
         "final_eval_required": evaluation["final_eval_required"],
         "val_evaluation_mode": evaluation["val_evaluation_mode"],
-        "fixed_eval_offsets": None,
-        "fixed_eval_offsets_sha256": None,
+        "fixed_eval_offsets": evaluation.get("val_eval_offsets", {}).get("count"),
+        "fixed_eval_offsets_sha256": evaluation.get("val_eval_offsets", {}).get(
+            "sha256"
+        ),
         "train_eval_subset_enabled": evaluation["train_eval_subset_enabled"],
         "train_eval_subset_tokens": evaluation["train_eval_subset_tokens"],
         "train_eval_offsets_sha256": evaluation["train_eval_offsets"]["sha256"],
@@ -379,6 +381,8 @@ def learning_rate(
     config: dict[str, Any], tokens_seen: int, effective_tokens: int
 ) -> float:
     maximum = float(config["max_lr"])
+    if config.get("lr_schedule", "cosine") == "constant":
+        return maximum
     minimum = float(config["min_lr"])
     warmup = int(config["warmup_tokens"])
     decay_end = int(config["lr_decay_end_tokens"])
@@ -536,7 +540,9 @@ def event_thresholds(config: dict[str, Any]) -> dict[int, set[str]]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--resume", action="store_true")
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", action="store_true")
+    initialization.add_argument("--init-from", type=Path)
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     config = json.loads((run_dir / "resolved-config.json").read_text(encoding="utf-8"))
@@ -642,12 +648,32 @@ def main() -> None:
         checkpoint = torch.load(
             checkpoint_path, map_location=device, weights_only=False
         )
+        if checkpoint.get("version") != 2:
+            raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
+        if checkpoint.get("full_training_config") != config:
+            raise RuntimeError(
+                "Checkpoint training configuration does not match the run"
+            )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         if scaler.is_enabled() and checkpoint.get("scaler"):
             scaler.load_state_dict(checkpoint["scaler"])
         progress = dict(checkpoint["progress"])
         best_val_loss = float(checkpoint["best_val_loss"])
+    elif args.init_from is not None:
+        initialization_state = torch.load(
+            args.init_from, map_location=device, weights_only=False
+        )
+        if initialization_state.get("version") != 2:
+            raise ValueError(f"Unsupported initialization format: {args.init_from}")
+        artifact_type = initialization_state.get("artifact")
+        if artifact_type not in (None, "initial-weights"):
+            raise ValueError(f"Unsupported initialization artifact: {artifact_type!r}")
+        state = {
+            key.removeprefix("_orig_mod."): value
+            for key, value in initialization_state["model"].items()
+        }
+        model.load_state_dict(state)
 
     base_model = model
     training_model: torch.nn.Module = model
@@ -660,7 +686,14 @@ def main() -> None:
     training_model.train()
     train_offsets_path = run_dir / config["evaluation"]["train_eval_offsets"]["path"]
     train_eval_offsets = np.load(train_offsets_path, allow_pickle=False).tolist()
-    val_offsets = list(range(0, len(val_data) - 1, block_size))
+    val_mode = config["evaluation"]["val_evaluation_mode"]
+    if val_mode == "full_validation":
+        val_offsets = list(range(0, len(val_data) - 1, block_size))
+    elif val_mode == "fixed_subset":
+        val_offsets_path = run_dir / config["evaluation"]["val_eval_offsets"]["path"]
+        val_offsets = np.load(val_offsets_path, allow_pickle=False).tolist()
+    else:
+        raise ValueError(f"Unsupported val_evaluation_mode: {val_mode!r}")
     runtime.update(
         world_size=world_size,
         gradient_accumulation_steps_per_gpu=accumulation,
@@ -684,6 +717,7 @@ def main() -> None:
     final_val_loss = math.nan
     total_training_seconds = 0.0
     started = time.monotonic()
+    last_evaluation_update = -1
     window_loss_sum = torch.zeros((), dtype=torch.float64, device=device)
     window_token_count = torch.zeros((), dtype=torch.float64, device=device)
     window_grad_sum = torch.zeros((), dtype=torch.float64, device=device)
@@ -693,7 +727,7 @@ def main() -> None:
     window_duration = torch.zeros((), dtype=torch.float64, device=device)
 
     def evaluate(reasons: set[str]) -> tuple[float, float]:
-        nonlocal best_val_loss, min_val_loss, tokens_at_min
+        nonlocal best_val_loss, min_val_loss, tokens_at_min, last_evaluation_update
         train_loss = evaluate_offsets(
             training_model,
             train_data,
@@ -759,6 +793,7 @@ def main() -> None:
                 reporter=reporter,
                 aliases=list(dict.fromkeys(aliases)),
             )
+        last_evaluation_update = int(progress["update_step"])
         return train_loss, val_loss
 
     def write_partial_summary(stop_reason: str, exit_code: int) -> None:
@@ -844,10 +879,11 @@ def main() -> None:
                 scaler.scale(scaled_loss).backward()
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
+            grad_clip = float(config["optimizer"]["grad_clip"])
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                base_model.parameters(), float(config["optimizer"]["grad_clip"])
+                base_model.parameters(), grad_clip if grad_clip > 0 else math.inf
             )
-            clipped = float(grad_norm) > float(config["optimizer"]["grad_clip"])
+            clipped = grad_clip > 0 and float(grad_norm) > grad_clip
             scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
@@ -940,7 +976,10 @@ def main() -> None:
             if crossed:
                 final_train_loss, final_val_loss = evaluate(crossed)
 
-        if config["evaluation"]["final_eval_required"]:
+        if (
+            config["evaluation"]["final_eval_required"]
+            and last_evaluation_update != progress["update_step"]
+        ):
             final_train_loss, final_val_loss = evaluate({"final"})
         save_checkpoint(
             run_dir=run_dir,

@@ -71,9 +71,9 @@ def print_results(selected: list[str], results: dict[str, dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run language-quality benchmarks on a native DMPod checkpoint."
+        description="Run language-quality benchmarks on a completed DMPod run."
     )
-    parser.add_argument("name", nargs="?", help="completed profile run name")
+    parser.add_argument("name", nargs="?", help="completed run name")
     parser.add_argument(
         "--benchmarks",
         nargs="+",

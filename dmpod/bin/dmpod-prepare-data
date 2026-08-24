@@ -19,6 +19,7 @@ from dmpod_common import (  # noqa: E402
     require_name,
     validate_dataset,
 )
+from dmpod_profile import ensure_dataset_manifest  # noqa: E402
 
 
 TINYSTORIES_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
@@ -87,7 +88,8 @@ def prepare_tinystories_smoke(datasets_root: Path) -> Path:
             "sha256": file_sha256(tokenizer_path),
             "name": "tiktoken:gpt2",
             "version": importlib.metadata.version("tiktoken"),
-            "vocab_size": 50304,
+            "vocab_size": 50257,
+            "model_vocab_size": 50304,
         },
         "document_boundary_token_id": encoding.eot_token,
         "padding_token_id": None,
@@ -106,22 +108,21 @@ def register_existing(name: str, source: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists() and not target.is_symlink():
         target.symlink_to(source, target_is_directory=True)
-        return target
-    if target.resolve() == source:
-        return target
-    if not target.is_dir():
-        raise FileExistsError(f"Cannot register dataset over {target}")
-    for filename in ("train.bin", "val.bin", "meta.pkl"):
-        source_file = source / filename
-        target_file = target / filename
-        if not source_file.exists():
-            continue
-        if target_file.exists() or target_file.is_symlink():
-            if target_file.resolve() != source_file.resolve():
-                raise FileExistsError(f"Refusing to replace {target_file}")
-            continue
-        target_file.symlink_to(source_file)
+    elif target.resolve() != source:
+        if not target.is_dir():
+            raise FileExistsError(f"Cannot register dataset over {target}")
+        for filename in ("train.bin", "val.bin", "meta.pkl", "dataset.json", "tokenizer.json"):
+            source_file = source / filename
+            target_file = target / filename
+            if not source_file.exists():
+                continue
+            if target_file.exists() or target_file.is_symlink():
+                if target_file.resolve() != source_file.resolve():
+                    raise FileExistsError(f"Refusing to replace {target_file}")
+                continue
+            target_file.symlink_to(source_file)
     validate_dataset(target)
+    ensure_dataset_manifest(target, name)
     return target
 
 
@@ -145,6 +146,7 @@ def main() -> None:
         script = dataset / "prepare.py"
         subprocess.run([sys.executable, str(script)], cwd=dataset, check=True)
         validate_dataset(dataset)
+        ensure_dataset_manifest(dataset, args.command)
         print(f"Dataset ready: {dataset}")
         return
     if args.command == "tinystories_smoke":

@@ -13,15 +13,13 @@ TRANSPOSED_SUFFIXES = (
 )
 
 
-def import_hf_checkpoint(
+def import_hf_weights(
     *,
     nanogpt_root: Path,
     model_id: str,
     revision: str | None,
     output: Path,
     model_config: dict[str, Any],
-    training_config: dict[str, Any],
-    dataset: str,
     cache_dir: Path,
 ) -> None:
     import torch
@@ -72,32 +70,21 @@ def import_hf_checkpoint(
         converted[key] = value.contiguous()
     native.load_state_dict(converted)
 
-    optimizer = native.configure_optimizers(
-        float(training_config.get("weight_decay", 0.1)),
-        float(training_config.get("learning_rate", 6e-4)),
-        (
-            float(training_config.get("beta1", 0.9)),
-            float(training_config.get("beta2", 0.95)),
-        ),
-        "cpu",
-    )
-    checkpoint = {
+    artifact = {
+        "version": 2,
+        "artifact": "initial-weights",
         "model": native.state_dict(),
-        "optimizer": optimizer.state_dict(),
         "model_args": model_args,
-        "iter_num": 0,
-        "best_val_loss": 1e9,
-        "config": {
-            "dataset": dataset,
-            "source_hf_model": model_id,
-            "source_hf_revision": revision,
-            "weights_only_restart": True,
+        "source": {
+            "type": "huggingface",
+            "model_id": model_id,
+            "revision": revision,
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
     try:
-        torch.save(checkpoint, temporary)
+        torch.save(artifact, temporary)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)

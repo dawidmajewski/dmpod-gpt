@@ -17,6 +17,7 @@ from dmpod_common import (  # noqa: E402
     execute_configs,
     file_sha256,
     load_environment_config,
+    load_json,
     nanogpt_root,
     require_name,
     tree_sha256,
@@ -25,11 +26,14 @@ from dmpod_common import (  # noqa: E402
 )
 from dmpod_profile import (  # noqa: E402
     canonical_run_name,
+    ensure_dataset_manifest,
     load_profile,
+    profile_from_configs,
     resolve_profile,
     validate_dataset_manifest,
     write_resolved_config,
     write_train_eval_offsets,
+    write_val_eval_offsets,
 )
 
 
@@ -70,6 +74,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
     dataset_manifest, dataset_validation = validate_dataset_manifest(
         manifest_path, profile
     )
+    tokenizer_source = Path(dataset_validation["tokenizer"]["path"])
     resolved = resolve_profile(
         profile,
         max_lr=args.max_lr,
@@ -81,7 +86,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
     require_name(name, "run name")
     if args.name and args.name != generated_name:
         raise ValueError(
-            f"Profile run name must be {generated_name!r}; omit NAME to generate it"
+            f"Run name for this profile must be {generated_name!r}; omit NAME to generate it"
         )
     runs_root = Path(environment["runs_root"])
     run_dir = runs_root / name
@@ -99,11 +104,13 @@ def create_profile_run(args: argparse.Namespace) -> None:
         profile_copy = staging / "sources" / "profile.json"
         dataset_copy = staging / "sources" / "dataset.json"
         validation_copy = staging / "sources" / "dataset-validation.json"
+        tokenizer_copy = staging / "sources" / "tokenizer.json"
         model_copy = staging / "sources" / "model.py"
         trainer_copy = staging / "sources" / "trainer.py"
         shutil.copy2(profile_path, profile_copy)
         atomic_json(dataset_copy, dataset_manifest)
         atomic_json(validation_copy, dataset_validation)
+        shutil.copy2(tokenizer_source, tokenizer_copy)
         shutil.copy2(nanogpt_root() / "model.py", model_copy)
         shutil.copy2(
             Path(__file__).resolve().parents[1] / "lib" / "trainer_v2.py",
@@ -114,10 +121,17 @@ def create_profile_run(args: argparse.Namespace) -> None:
         resolved["name"] = name
         resolved["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         resolved["data"]["path"] = str(dataset_dir)
+        resolved["dataset"]["tokenizer"]["path"] = str(
+            run_dir / "sources" / "tokenizer.json"
+        )
         resolved["wandb"]["run_id"] = uuid.uuid4().hex[:8]
         resolved["evaluation"]["train_eval_offsets"] = write_train_eval_offsets(
             staging, resolved
         )
+        if resolved["evaluation"]["val_evaluation_mode"] == "fixed_subset":
+            resolved["evaluation"]["val_eval_offsets"] = write_val_eval_offsets(
+                staging, resolved
+            )
         resolved_path = staging / "resolved-config.json"
         write_resolved_config(resolved_path, resolved)
         provenance = git_provenance(nanogpt_root())
@@ -125,12 +139,17 @@ def create_profile_run(args: argparse.Namespace) -> None:
             "profile": profile_copy,
             "dataset_manifest": dataset_copy,
             "dataset_validation": validation_copy,
+            "tokenizer": tokenizer_copy,
             "model_source": model_copy,
             "trainer_source": trainer_copy,
             "resolved_config": resolved_path,
             "train_eval_offsets": staging
             / resolved["evaluation"]["train_eval_offsets"]["path"],
         }
+        if "val_eval_offsets" in resolved["evaluation"]:
+            tracked["val_eval_offsets"] = (
+                staging / resolved["evaluation"]["val_eval_offsets"]["path"]
+            )
         run_manifest = {
             "version": 2,
             "name": name,
@@ -157,18 +176,15 @@ def create_profile_run(args: argparse.Namespace) -> None:
     print(f"Attach with: tmux attach -t dmpod-{name}")
 
 
-def validate_checkpoint(path: Path, model: dict[str, object]) -> int:
+def validate_checkpoint(
+    path: Path, model: dict[str, object]
+) -> tuple[int, dict[str, object]]:
     import torch
 
     checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
-    for key in (
-        "model",
-        "optimizer",
-        "model_args",
-        "iter_num",
-        "best_val_loss",
-        "config",
-    ):
+    if checkpoint.get("version") != 2:
+        raise ValueError(f"Unsupported checkpoint format: {path}")
+    for key in ("model", "model_args", "full_training_config", "tokenizer_reference"):
         if key not in checkpoint:
             raise ValueError(f"Checkpoint is missing {key!r}: {path}")
     checkpoint_model = checkpoint["model_args"]
@@ -181,7 +197,10 @@ def validate_checkpoint(path: Path, model: dict[str, object]) -> int:
     vocab_size = checkpoint_model.get("vocab_size")
     if type(vocab_size) is not int or vocab_size < 1:
         raise ValueError(f"Checkpoint has an invalid vocab_size: {vocab_size!r}")
-    return vocab_size
+    tokenizer_reference = checkpoint["tokenizer_reference"]
+    if not isinstance(tokenizer_reference, dict):
+        raise ValueError(f"Checkpoint has an invalid tokenizer reference: {path}")
+    return vocab_size, tokenizer_reference
 
 
 def hf_reference(model_id: str) -> tuple[str, bool]:
@@ -240,6 +259,193 @@ def validate_hf(
     return reference, local, resolved_revision, content_hash, int(config.vocab_size)
 
 
+def create_config_run(args: argparse.Namespace) -> None:
+    if not args.name:
+        raise ValueError("Config-based runs require NAME")
+    if not args.model_config or not args.training_config or not args.source:
+        raise ValueError(
+            "Config-based runs require --model-config, --training-config, and --source"
+        )
+    require_name(args.name, "run name")
+    environment = load_environment_config()
+    model_path = args.model_config.expanduser().resolve()
+    training_path = args.training_config.expanduser().resolve()
+    for path in (model_path, training_path):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+
+    model_values = execute_configs([model_path])
+    validate_model_config(model_values)
+    training_values = execute_configs([training_path])
+    overlap = sorted(set(ARCHITECTURE_KEYS) & training_values.keys())
+    if overlap:
+        raise ValueError(
+            "Training config must not redefine model architecture: "
+            + ", ".join(overlap)
+        )
+    effective = execute_configs([model_path, training_path])
+    dataset_name = effective.get("dataset")
+    if not isinstance(dataset_name, str) or not dataset_name:
+        raise ValueError("Training config must define a dataset string")
+    dataset_dir = nanogpt_root() / "data" / dataset_name
+    validate_dataset(dataset_dir, block_size=int(model_values["block_size"]))
+    dataset_manifest_path = ensure_dataset_manifest(dataset_dir, dataset_name)
+    dataset_manifest = load_json(dataset_manifest_path)
+
+    source: dict[str, object] = {"type": args.source}
+    if args.source == "scratch":
+        if args.model_id or args.revision or args.checkpoint:
+            raise ValueError("scratch source does not accept model or checkpoint arguments")
+        tokenizer = dataset_manifest["tokenizer"]
+        vocab_size = int(tokenizer.get("model_vocab_size", tokenizer["vocab_size"]))
+    elif args.source == "hf":
+        if not args.model_id or args.checkpoint:
+            raise ValueError("hf source requires --model-id and does not accept --checkpoint")
+        reference, local, resolved_revision, content_hash, vocab_size = validate_hf(
+            args.model_id,
+            args.revision,
+            Path(environment["hf_cache"]),
+            model_values,
+        )
+        source.update(
+            model_id=reference,
+            revision=resolved_revision,
+            requested_revision=args.revision,
+            local=local,
+            content_sha256=content_hash,
+            vocab_size=vocab_size,
+        )
+    else:
+        if not args.checkpoint or args.model_id or args.revision:
+            raise ValueError(
+                "checkpoint source requires --checkpoint and does not accept HF arguments"
+            )
+        checkpoint = args.checkpoint.expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(checkpoint)
+        vocab_size, checkpoint_tokenizer = validate_checkpoint(checkpoint, model_values)
+        if checkpoint_tokenizer.get("sha256") != dataset_manifest["tokenizer"].get(
+            "sha256"
+        ):
+            raise ValueError("Checkpoint tokenizer does not match the dataset tokenizer")
+        source.update(
+            checkpoint=str(checkpoint),
+            checkpoint_sha256=file_sha256(checkpoint),
+            vocab_size=vocab_size,
+        )
+
+    if args.source == "hf" and dataset_manifest["tokenizer"].get("name") != "tiktoken:gpt2":
+        raise ValueError("GPT-2 Hugging Face initialization requires a GPT-2 tokenizer")
+
+    profile = profile_from_configs(
+        name=args.name,
+        model_values=model_values,
+        training_values=training_values,
+        dataset_dir=dataset_dir,
+        dataset_name=dataset_name,
+        vocab_size=vocab_size,
+        wandb_project=str(environment["wandb"]["project"]),
+    )
+    _, dataset_validation = validate_dataset_manifest(dataset_manifest_path, profile)
+    tokenizer_source = Path(dataset_validation["tokenizer"]["path"])
+    resolved = resolve_profile(
+        profile,
+        max_lr=None,
+        seed=None,
+        dataset_validation=dataset_validation,
+    )
+    resolved["profile"] = "config"
+    resolved["name"] = args.name
+    resolved["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    resolved["wandb"]["run_id"] = uuid.uuid4().hex[:8]
+
+    runs_root = Path(environment["runs_root"])
+    run_dir = runs_root / args.name
+    if run_dir.exists():
+        raise FileExistsError(f"Run already exists: {run_dir}")
+    resolved["dataset"]["tokenizer"]["path"] = str(
+        run_dir / "sources" / "tokenizer.json"
+    )
+    runs_root.mkdir(parents=True, exist_ok=True)
+    staging = runs_root / f".{args.name}.tmp.{os.getpid()}"
+    if staging.exists():
+        raise FileExistsError(f"Staging directory already exists: {staging}")
+    staging.mkdir()
+    try:
+        for directory in ("checkpoints", "logs", "reports", "sources"):
+            (staging / directory).mkdir()
+        profile_copy = staging / "sources" / "profile.json"
+        model_config_copy = staging / "sources" / "model-config.py"
+        training_config_copy = staging / "sources" / "training-config.py"
+        dataset_copy = staging / "sources" / "dataset.json"
+        validation_copy = staging / "sources" / "dataset-validation.json"
+        tokenizer_copy = staging / "sources" / "tokenizer.json"
+        model_copy = staging / "sources" / "model.py"
+        trainer_copy = staging / "sources" / "trainer.py"
+        atomic_json(profile_copy, profile)
+        shutil.copy2(model_path, model_config_copy)
+        shutil.copy2(training_path, training_config_copy)
+        atomic_json(dataset_copy, dataset_manifest)
+        atomic_json(validation_copy, dataset_validation)
+        shutil.copy2(tokenizer_source, tokenizer_copy)
+        shutil.copy2(nanogpt_root() / "model.py", model_copy)
+        shutil.copy2(
+            Path(__file__).resolve().parents[1] / "lib" / "trainer_v2.py",
+            trainer_copy,
+        )
+        resolved["evaluation"]["train_eval_offsets"] = write_train_eval_offsets(
+            staging, resolved
+        )
+        if resolved["evaluation"]["val_evaluation_mode"] == "fixed_subset":
+            resolved["evaluation"]["val_eval_offsets"] = write_val_eval_offsets(
+                staging, resolved
+            )
+        resolved_path = staging / "resolved-config.json"
+        write_resolved_config(resolved_path, resolved)
+        provenance = git_provenance(nanogpt_root())
+        tracked = {
+            "profile": profile_copy,
+            "model_config": model_config_copy,
+            "training_config": training_config_copy,
+            "dataset_manifest": dataset_copy,
+            "dataset_validation": validation_copy,
+            "tokenizer": tokenizer_copy,
+            "model_source": model_copy,
+            "trainer_source": trainer_copy,
+            "resolved_config": resolved_path,
+            "train_eval_offsets": staging
+            / resolved["evaluation"]["train_eval_offsets"]["path"],
+        }
+        if "val_eval_offsets" in resolved["evaluation"]:
+            tracked["val_eval_offsets"] = (
+                staging / resolved["evaluation"]["val_eval_offsets"]["path"]
+            )
+        run_manifest = {
+            "version": 2,
+            "name": args.name,
+            "created_at": resolved["created_at"],
+            "profile": "config",
+            "source": source,
+            "dataset": dataset_validation,
+            "git": provenance,
+            "files": {
+                key: {
+                    "path": str(path.relative_to(staging)),
+                    "sha256": file_sha256(path),
+                }
+                for key, path in tracked.items()
+            },
+        }
+        atomic_json(staging / "manifest.json", run_manifest)
+        os.replace(staging, run_dir)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    print(f"Training run created: {run_dir}")
+    print(f"Start in tmux: dmpod-train {args.name} --tmux")
+    print(f"Attach with: tmux attach -t dmpod-{args.name}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create an immutable DMPod training run.")
     parser.add_argument("name", nargs="?")
@@ -267,141 +473,13 @@ def main() -> None:
                 args.checkpoint,
             )
         ):
-            raise ValueError("--profile cannot be combined with legacy run arguments")
+            raise ValueError("--profile cannot be combined with config-based run arguments")
         create_profile_run(args)
         return
 
-    if not args.name:
-        raise ValueError("Legacy runs require NAME")
-    if not args.model_config or not args.training_config or not args.source:
-        raise ValueError(
-            "Legacy runs require --model-config, --training-config, and --source"
-        )
     if args.max_lr is not None or args.seed is not None or args.dataset_manifest:
         raise ValueError("Profile overrides require --profile")
-    require_name(args.name, "run name")
-    environment = load_environment_config()
-    model_path = args.model_config.expanduser().resolve()
-    training_path = args.training_config.expanduser().resolve()
-    for path in (model_path, training_path):
-        if not path.is_file():
-            raise FileNotFoundError(path)
-
-    model_values = execute_configs([model_path])
-    validate_model_config(model_values)
-    training_values = execute_configs([training_path])
-    overlap = sorted(set(ARCHITECTURE_KEYS) & training_values.keys())
-    if overlap:
-        raise ValueError(
-            "Training config must not redefine model architecture: "
-            + ", ".join(overlap)
-        )
-    effective = execute_configs([model_path, training_path])
-    dataset = effective.get("dataset")
-    if not isinstance(dataset, str) or not dataset:
-        raise ValueError("Training config must define a dataset string")
-    validate_dataset(
-        nanogpt_root() / "data" / dataset,
-        block_size=int(model_values["block_size"]),
-    )
-
-    runs_root = Path(environment["runs_root"])
-    run_dir = runs_root / args.name
-    if run_dir.exists():
-        raise FileExistsError(f"Run already exists: {run_dir}")
-
-    source: dict[str, object] = {"type": args.source}
-    if args.source == "scratch":
-        if args.model_id or args.revision or args.checkpoint:
-            raise ValueError("scratch source does not accept model or checkpoint arguments")
-    elif args.source == "hf":
-        if not args.model_id or args.checkpoint:
-            raise ValueError("hf source requires --model-id and does not accept --checkpoint")
-        reference, local, resolved_revision, content_hash, vocab_size = validate_hf(
-            args.model_id,
-            args.revision,
-            Path(environment["hf_cache"]),
-            model_values,
-        )
-        source.update(
-            model_id=reference,
-            revision=resolved_revision,
-            requested_revision=args.revision,
-            local=local,
-            content_sha256=content_hash,
-            vocab_size=vocab_size,
-        )
-    else:
-        if not args.checkpoint or args.model_id or args.revision:
-            raise ValueError(
-                "checkpoint source requires --checkpoint and does not accept HF arguments"
-            )
-        checkpoint = args.checkpoint.expanduser().resolve()
-        if not checkpoint.is_file():
-            raise FileNotFoundError(checkpoint)
-        vocab_size = validate_checkpoint(checkpoint, model_values)
-        source.update(
-            checkpoint=str(checkpoint),
-            checkpoint_sha256=file_sha256(checkpoint),
-            vocab_size=vocab_size,
-        )
-
-    runs_root.mkdir(parents=True, exist_ok=True)
-    staging = runs_root / f".{args.name}.tmp.{os.getpid()}"
-    if staging.exists():
-        raise FileExistsError(f"Staging directory already exists: {staging}")
-    staging.mkdir()
-    try:
-        model_copy = staging / "model.py"
-        training_copy = staging / "training.py"
-        shutil.copy2(model_path, model_copy)
-        shutil.copy2(training_path, training_copy)
-        checkpoints = staging / "checkpoints"
-        logs = staging / "logs"
-        checkpoints.mkdir()
-        logs.mkdir()
-
-        wandb = environment["wandb"]
-        runtime = staging / "runtime.py"
-        runtime.write_text(
-            "# Generated by dmpod-create-training.\n"
-            f"out_dir = {str(run_dir / 'checkpoints')!r}\n"
-            f"wandb_log = {bool(wandb['enabled'])!r}\n"
-            f"wandb_project = {str(wandb['project'])!r}\n"
-            f"wandb_run_name = {args.name!r}\n",
-            encoding="utf-8",
-        )
-
-        revision = subprocess.run(
-            ["git", "-C", str(nanogpt_root()), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        manifest = {
-            "version": 1,
-            "name": args.name,
-            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "nanogpt_revision": revision,
-            "dataset": dataset,
-            "source": source,
-            "architecture": {key: model_values[key] for key in ARCHITECTURE_KEYS},
-            "configs": {
-                "model": {"path": "model.py", "sha256": file_sha256(model_copy)},
-                "training": {
-                    "path": "training.py",
-                    "sha256": file_sha256(training_copy),
-                },
-                "runtime": {"path": "runtime.py", "sha256": file_sha256(runtime)},
-            },
-        }
-        atomic_json(staging / "manifest.json", manifest)
-        os.replace(staging, run_dir)
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-    print(f"Training run created: {run_dir}")
-    print(f"Start it with: dmpod-train {args.name}")
+    create_config_run(args)
 
 
 if __name__ == "__main__":

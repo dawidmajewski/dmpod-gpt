@@ -113,9 +113,10 @@ no automated OpenWebText preset.
 
 ## Training definitions
 
-Architecture and training settings are separate native nanoGPT Python configs.
-A run snapshots both files, generates `runtime.py`, and records provenance in
-`manifest.json`:
+Architecture and training settings can be supplied as separate nanoGPT Python
+configs. A run compiles them into `resolved-config.json` and snapshots the
+configs, tokenizer, dataset metadata, model source, and trainer under `sources/`.
+All provenance and immutable file hashes are recorded in `manifest.json`:
 
 ```bash
 dmpod-create-training demo \
@@ -150,7 +151,7 @@ dmpod-create-training hf-demo \
   --revision COMMIT_SHA
 ```
 
-Initialize from a trusted native nanoGPT checkpoint already on the volume:
+Initialize from a trusted DMPod checkpoint already on the volume:
 
 ```bash
 dmpod-create-training continued \
@@ -166,8 +167,8 @@ or vocabulary is not supported during resume.
 
 ## Reproducible profiles
 
-Profile runs use a versioned, immutable run format with a run-local trainer and
-model source. They always write the same metrics to local JSONL and W&B.
+Profiles are another input for the same immutable run format, run-local trainer,
+checkpoint schema, local JSONL metrics, and W&B reporting.
 
 The canonical minimal-en profile uses 16 layers, 12 heads, width 768, context
 2048, vocabulary 12,288, tied embeddings, and exactly 124,281,600 trainable
@@ -178,12 +179,12 @@ dmpod-create-training --profile minimal-en-125m --max-lr 6e-4
 dmpod-train lr-0.0006_seed-1337_btok-262144 --tmux
 ```
 
-Profile runs require a complete `dataset.json` next to `train.bin`, `val.bin`,
+Profiles require a complete `dataset.json` next to `train.bin`, `val.bin`,
 and the tokenizer file. Start from `datasets/dataset.json.example`. Creation
 scans the binaries once, verifies SHA-256, token counts, tokenizer provenance,
 and that every token ID is below the configured vocabulary size.
 
-W&B online mode is the default. A profile run fails before using the GPU if the
+W&B online mode is the default. A run fails before using the GPU if the
 key is unavailable. Explicit offline mode remains available through
 `dmpod-setup --wandb-mode offline`; local `metrics.jsonl`, `summary.json`, and
 checkpoint records are always written.
@@ -225,7 +226,7 @@ run-benchmarks \
 Results are printed and appended as JSONL to
 `/workspace/benchmarks/results.jsonl` by default.
 
-Evaluate a completed native profile run for language quality:
+Evaluate any completed DMPod run for language quality:
 
 ```bash
 dmpod-benchmark RUN_NAME
