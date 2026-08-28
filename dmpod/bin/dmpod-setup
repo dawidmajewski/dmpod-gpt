@@ -12,7 +12,7 @@ from dmpod_common import (  # noqa: E402
     atomic_write,
     config_path,
     load_environment_config,
-    nanogpt_root,
+    project_root,
     state_root,
     verify_wandb_key,
     workspace_root,
@@ -63,6 +63,10 @@ def main() -> None:
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-entity")
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"))
+    parser.add_argument(
+        "--project-root",
+        help="Path to a nanoGPT-compatible project (default: /workspace/nanogpt)",
+    )
     parser.add_argument("--non-interactive", action="store_true")
     args = parser.parse_args()
     if args.skip_hf and args.save_hf_token:
@@ -71,6 +75,23 @@ def main() -> None:
     existing = load_environment_config(required=False)
     existing_wandb = existing.get("wandb", {})
     root = workspace_root()
+    selected_project_root = (
+        Path(args.project_root).expanduser().resolve()
+        if args.project_root
+        else project_root()
+    )
+    if not selected_project_root.is_dir():
+        raise SystemExit(f"Project root does not exist: {selected_project_root}")
+    missing_project_files = [
+        name
+        for name in ("model.py", "train.py")
+        if not (selected_project_root / name).is_file()
+    ]
+    if missing_project_files:
+        raise SystemExit(
+            f"Project root is not nanoGPT-compatible: {selected_project_root}; "
+            f"missing {', '.join(missing_project_files)}"
+        )
     paths = {
         "datasets_root": root / "datasets",
         "models_root": root / "models",
@@ -203,9 +224,9 @@ def main() -> None:
             hf_username = configure_huggingface(hf_token, save=hf_saved)
 
     config = {
-        "version": 1,
+        "version": 2,
         "workspace_root": str(root),
-        "nanogpt_root": str(nanogpt_root()),
+        "project_root": str(selected_project_root),
         **{name: str(path) for name, path in paths.items()},
         "wandb": {
             "enabled": enabled and mode != "disabled",
@@ -217,7 +238,7 @@ def main() -> None:
     }
     write_environment_config(config)
     print(f"DMPod environment configured: {config_path()}")
-    print(f"nanoGPT workspace: {nanogpt_root()}")
+    print(f"nanoGPT-compatible project: {selected_project_root}")
     print(f"W&B mode: {mode}; key source: {key_source}")
     if hf_username:
         persistence = "saved" if hf_saved else "not saved"

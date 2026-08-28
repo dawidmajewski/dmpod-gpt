@@ -18,7 +18,7 @@ from dmpod_common import (  # noqa: E402
     file_sha256,
     load_environment_config,
     load_json,
-    nanogpt_root,
+    project_root,
     require_name,
     tree_sha256,
     validate_dataset,
@@ -64,7 +64,7 @@ def git_provenance(root: Path) -> dict[str, object]:
 def create_profile_run(args: argparse.Namespace) -> None:
     environment = load_environment_config()
     profile_path, profile = load_profile(args.profile)
-    dataset_dir = (nanogpt_root() / profile["data"]["path"]).resolve()
+    dataset_dir = (project_root() / profile["data"]["path"]).resolve()
     manifest_path = (
         args.dataset_manifest.expanduser().resolve()
         if args.dataset_manifest
@@ -125,7 +125,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
         atomic_json(dataset_copy, dataset_manifest)
         atomic_json(validation_copy, dataset_validation)
         shutil.copy2(tokenizer_source, tokenizer_copy)
-        shutil.copy2(nanogpt_root() / "model.py", model_copy)
+        shutil.copy2(project_root() / "model.py", model_copy)
         shutil.copy2(
             Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
@@ -151,7 +151,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
             )
         config_path = staging / "config.json"
         write_config(config_path, resolved)
-        provenance = git_provenance(nanogpt_root())
+        provenance = git_provenance(project_root())
         tracked = {
             "profile": profile_copy,
             "dataset_manifest": dataset_copy,
@@ -309,7 +309,7 @@ def create_config_run(args: argparse.Namespace) -> None:
     dataset_name = effective.get("dataset")
     if not isinstance(dataset_name, str) or not dataset_name:
         raise ValueError("Training config must define a dataset string")
-    dataset_dir = nanogpt_root() / "data" / dataset_name
+    dataset_dir = project_root() / "data" / dataset_name
     validate_dataset(dataset_dir, block_size=int(model_values["block_size"]))
     dataset_manifest_path = ensure_dataset_manifest(dataset_dir, dataset_name)
     dataset_manifest = load_json(dataset_manifest_path)
@@ -430,7 +430,7 @@ def create_config_run(args: argparse.Namespace) -> None:
         atomic_json(dataset_copy, dataset_manifest)
         atomic_json(validation_copy, dataset_validation)
         shutil.copy2(tokenizer_source, tokenizer_copy)
-        shutil.copy2(nanogpt_root() / "model.py", model_copy)
+        shutil.copy2(project_root() / "model.py", model_copy)
         shutil.copy2(
             Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
@@ -448,7 +448,7 @@ def create_config_run(args: argparse.Namespace) -> None:
             )
         config_path = staging / "config.json"
         write_config(config_path, resolved)
-        provenance = git_provenance(nanogpt_root())
+        provenance = git_provenance(project_root())
         tracked = {
             "profile": profile_copy,
             "model_config": model_config_copy,

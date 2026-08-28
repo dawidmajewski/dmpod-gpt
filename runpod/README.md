@@ -1,6 +1,8 @@
 # DMPod GPT
 
-A ready-to-use nanoGPT development and training environment for Runpod.
+A ready-to-use development and training environment for nanoGPT and compatible
+forks on Runpod. DMPod GPT is based on
+[karpathy/nanoGPT](https://github.com/karpathy/nanoGPT).
 
 ## Description
 
@@ -8,6 +10,15 @@ DMPod GPT provides a reproducible PyTorch 2.8 and CUDA 12.8 environment with
 nanoGPT, training utilities, Codex CLI, and Claude Code preinstalled. Project
 files, datasets, caches, and checkpoints are stored under `/workspace` so they
 can persist between Pods.
+
+DMPod tooling is installed outside the project under `/opt/dmpod`. To use an
+existing compatible fork without injecting DMPod tooling into it, clone the
+repository and select it during setup:
+
+```bash
+git clone https://github.com/OWNER/REPOSITORY.git /workspace/my-nanogpt
+dmpod-setup --project-root /workspace/my-nanogpt
+```
 
 ## Getting Started
 

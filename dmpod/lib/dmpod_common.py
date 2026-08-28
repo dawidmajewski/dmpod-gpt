@@ -17,10 +17,19 @@ def workspace_root() -> Path:
     return Path(os.environ.get("DMPOD_WORKSPACE", "/workspace")).resolve()
 
 
-def nanogpt_root() -> Path:
-    return Path(
-        os.environ.get("DMPOD_NANOGPT_ROOT", str(workspace_root() / "nanogpt"))
-    ).resolve()
+def project_root() -> Path:
+    configured = os.environ.get("DMPOD_PROJECT_ROOT") or os.environ.get(
+        "DMPOD_NANOGPT_ROOT"
+    )
+    if not configured:
+        path = config_path()
+        if path.is_file():
+            with path.open("rb") as source:
+                environment = tomllib.load(source)
+            configured = environment.get("project_root") or environment.get(
+                "nanogpt_root"
+            )
+    return Path(configured or workspace_root() / "nanogpt").expanduser().resolve()
 
 
 def state_root() -> Path:
@@ -61,7 +70,7 @@ def write_environment_config(config: dict[str, Any]) -> None:
     lines = [
         f'version = {int(config["version"])}',
         f'workspace_root = {toml_string(config["workspace_root"])}',
-        f'nanogpt_root = {toml_string(config["nanogpt_root"])}',
+        f'project_root = {toml_string(config["project_root"])}',
         f'datasets_root = {toml_string(config["datasets_root"])}',
         f'models_root = {toml_string(config["models_root"])}',
         f'runs_root = {toml_string(config["runs_root"])}',

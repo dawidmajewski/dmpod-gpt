@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from dmpod_common import (  # noqa: E402
     execute_configs,
     load_environment_config,
-    nanogpt_root,
+    project_root,
     validate_model_config,
 )
 
@@ -48,7 +48,7 @@ def main() -> None:
     if block_size > int(values["block_size"]):
         raise ValueError("Benchmark block size exceeds the model block size")
 
-    sys.path.insert(0, str(nanogpt_root()))
+    sys.path.insert(0, str(project_root()))
     from model import GPT, GPTConfig
 
     config = GPTConfig(

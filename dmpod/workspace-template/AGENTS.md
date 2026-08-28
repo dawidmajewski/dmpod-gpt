@@ -2,7 +2,9 @@
 
 This directory is a persistent copy of the pinned upstream nanoGPT repository.
 Its Git history is preserved. `/opt/nanogpt` is the clean image copy you can use
-as a comparison point.
+as a comparison point. DMPod commands and agent skills are installed outside
+this repository under `/opt/dmpod`; this checkout is the default starter project,
+not the DMPod installation itself.
 
 ## Safety
 

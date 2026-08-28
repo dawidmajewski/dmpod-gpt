@@ -2,8 +2,11 @@
 
 You are running inside a GPU Pod on RunPod. This image is dedicated to DMPod
 nanoGPT model training and evaluation. The persistent workspace is `/workspace`,
-the canonical project root is `/workspace/nanogpt`, and saved training runs are
-under `/workspace/runs`. Work in the project root and follow its `AGENTS.md`.
+the default project root is `/workspace/nanogpt`, and saved training runs are
+under `/workspace/runs`. A user may select their own nanoGPT-compatible fork with
+`dmpod-setup --project-root PATH`; work in the selected project and follow its
+own `AGENTS.md` or `CLAUDE.md`. DMPod tooling is installed under `/opt/dmpod` and
+must not be copied into or overwrite a user-provided repository.
 
 - Prefer DMPod commands over direct nanoGPT training commands.
 - Unless the user names another project, interpret questions about "training",

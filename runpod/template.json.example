@@ -14,7 +14,7 @@
   "isServerless": false,
   "name": "dmpod-gpt-v1",
   "ports": ["8888/http", "22/tcp"],
-  "readme": "Persistent nanoGPT environment on Runpod. Attach storage at /workspace, run dmpod-setup, verify with dmpod-wandb-status, then prepare data and create a named training run. Codex and Claude Code include DMPod training and benchmark context; their authentication is user-managed.",
+  "readme": "Persistent environment for nanoGPT and compatible forks on Runpod. DMPod tooling stays outside the selected project. Attach storage at /workspace, run dmpod-setup (optionally with --project-root PATH), verify with dmpod-wandb-status, then prepare data and create a named training run. Codex and Claude Code include DMPod training and benchmark context; their authentication is user-managed.",
   "volumeInGb": 50,
   "volumeMountPath": "/workspace"
 }

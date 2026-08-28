@@ -15,7 +15,7 @@ from dmpod_common import (  # noqa: E402
     atomic_json,
     file_sha256,
     load_environment_config,
-    nanogpt_root,
+    project_root,
     require_name,
     validate_dataset,
 )
@@ -104,7 +104,7 @@ def register_existing(name: str, source: Path) -> Path:
     require_name(name, "dataset name")
     source = source.resolve()
     validate_dataset(source)
-    target = nanogpt_root() / "data" / name
+    target = project_root() / "data" / name
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists() and not target.is_symlink():
         target.symlink_to(source, target_is_directory=True)
@@ -140,7 +140,7 @@ def main() -> None:
     args = parser.parse_args()
 
     environment = load_environment_config()
-    root = nanogpt_root()
+    root = project_root()
     if args.command in {"shakespeare", "shakespeare_char"}:
         dataset = root / "data" / args.command
         script = dataset / "prepare.py"

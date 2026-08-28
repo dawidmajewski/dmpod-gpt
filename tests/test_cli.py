@@ -42,7 +42,7 @@ class DMPodCliTests(unittest.TestCase):
         self.env.pop("HUGGING_FACE_HUB_TOKEN", None)
         self.env.update(
             DMPOD_WORKSPACE=str(self.workspace),
-            DMPOD_NANOGPT_ROOT=str(self.workspace / "nanogpt"),
+            DMPOD_PROJECT_ROOT=str(self.workspace / "nanogpt"),
             DMPOD_IMAGE_NANOGPT=str(self.image_nanogpt),
             DMPOD_TEMPLATE_ROOT=str(TEMPLATE),
             DMPOD_NANOGPT_PATCH="",
@@ -286,6 +286,23 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.initialize_workspace()
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
 
+    def test_entrypoint_uses_custom_fork_without_modifying_it(self) -> None:
+        project = self.workspace / "custom-fork"
+        project.mkdir(parents=True)
+        (project / "model.py").write_text("# custom model\n", encoding="utf-8")
+        (project / "train.py").write_text("# custom trainer\n", encoding="utf-8")
+        marker = project / "user-file.txt"
+        marker.write_text("keep\n", encoding="utf-8")
+        self.env["DMPOD_PROJECT_ROOT"] = str(project)
+
+        result = self.run_command(str(ENTRYPOINT), "/bin/pwd")
+
+        self.assertEqual(Path(result.stdout.strip()).resolve(), project.resolve())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
+        self.assertFalse((project / "AGENTS.md").exists())
+        self.assertFalse((project / "CLAUDE.md").exists())
+        self.assertFalse((self.workspace / "nanogpt").exists())
+
     def test_agent_guidance_identifies_runpod_and_dmpod_workflows(self) -> None:
         machine = AGENT_GUIDANCE.read_text(encoding="utf-8")
         project = (TEMPLATE / "AGENTS.md").read_text(encoding="utf-8")
@@ -365,10 +382,62 @@ printf '%s\\n' "$@" > "$DMPOD_TEST_TMUX_ARGUMENTS"
         self.assertTrue(config.is_file())
         self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
         content = config.read_text(encoding="utf-8")
+        self.assertIn("version = 2", content)
+        self.assertIn(
+            f'project_root = "{(self.workspace / "nanogpt").resolve()}"', content
+        )
         self.assertIn('mode = "offline"', content)
         self.assertIn('project = "nanogpt-training"', content)
         self.assertNotIn("model_id", content)
         self.assertNotIn("learning_rate", content)
+
+    def test_setup_persists_custom_nanogpt_fork(self) -> None:
+        self.initialize_workspace()
+        project = self.workspace / "custom-fork"
+        project.mkdir()
+        (project / "model.py").write_text("# custom model\n", encoding="utf-8")
+        (project / "train.py").write_text("# custom trainer\n", encoding="utf-8")
+        self.env.pop("DMPOD_PROJECT_ROOT")
+
+        result = self.run_command(
+            str(BIN / "dmpod-setup"),
+            "--project-root",
+            str(project),
+            "--wandb-mode",
+            "offline",
+            "--skip-hf",
+            "--non-interactive",
+        )
+
+        config = (self.workspace / ".dmpod" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f'project_root = "{project.resolve()}"', config)
+        self.assertIn(
+            f"nanoGPT-compatible project: {project.resolve()}", result.stdout
+        )
+        self.assertFalse((project / "AGENTS.md").exists())
+
+        restarted = self.run_command(str(ENTRYPOINT), "/bin/pwd")
+        self.assertEqual(Path(restarted.stdout.strip()).resolve(), project.resolve())
+
+    def test_setup_rejects_incompatible_project(self) -> None:
+        project = self.workspace / "other-project"
+        project.mkdir(parents=True)
+        self.env.pop("DMPOD_PROJECT_ROOT")
+
+        result = self.run_failure(
+            str(BIN / "dmpod-setup"),
+            "--project-root",
+            str(project),
+            "--wandb-mode",
+            "offline",
+            "--skip-hf",
+            "--non-interactive",
+        )
+
+        self.assertIn("not nanoGPT-compatible", result.stderr)
+        self.assertIn("model.py, train.py", result.stderr)
 
     def test_setup_accepts_hidden_credential_and_reuses_workspace_copy(self) -> None:
         self.initialize_workspace()

@@ -1,9 +1,10 @@
 # DMPod GPT
 
-Reproducible nanoGPT development and training image for RunPod. The image keeps
-RunPod's standard `/start.sh`, SSH, and optional Jupyter services. It adds only a
-pinned nanoGPT checkout, training dependencies, Codex CLI, Claude Code, and a
-small set of commands for persistent work under `/workspace`.
+Reproducible development and training image for nanoGPT and compatible forks on
+RunPod. The project is based on [karpathy/nanoGPT](https://github.com/karpathy/nanoGPT).
+The image keeps RunPod's standard `/start.sh`, SSH, and optional Jupyter services.
+It adds a pinned starter checkout, training dependencies, Codex CLI, Claude Code,
+and DMPod commands that operate on persistent data under `/workspace`.
 
 ## Image contents
 
@@ -11,6 +12,8 @@ small set of commands for persistent work under `/workspace`.
 - DMPod version from `DMPOD_VERSION`, embedded in the image metadata and environment.
 - Official `karpathy/nanoGPT` cloned at the commit in `NANOGPT_REVISION`.
 - The complete `/opt/nanogpt/.git` directory for local history and comparisons.
+- DMPod commands, profiles, guidance, and skills installed under `/opt/dmpod`
+  and exposed through `/usr/local/bin`, outside the user's project repository.
 - Codex CLI `0.149.0` and Claude Code `2.1.240`, both checksum-verified.
 - Machine-level DMPod guidance and a shared Hugging Face publication skill for
   Codex and Claude Code. Both agents are told that they are working on a RunPod
@@ -19,15 +22,15 @@ small set of commands for persistent work under `/workspace`.
 - `transformers`, `datasets`, `tiktoken`, W&B, and related pinned dependencies.
 - No datasets, model weights, checkpoints, credentials, or authentication state.
 
-On first start the entrypoint copies `/opt/nanogpt`, including `.git`, to
-`/workspace/nanogpt` and adds `AGENTS.md`, `CLAUDE.md`, and example configs. It
-never overwrites an existing workspace. It then executes the base image's
-`/start.sh`, so the Pod remains available after commands or training finish.
-Interactive shells that start in `/workspace` or `/root` move to
-`/workspace/nanogpt`, where both agents can discover the project instructions.
+Without a configured project, the first start copies `/opt/nanogpt`, including
+`.git`, to `/workspace/nanogpt` and adds `AGENTS.md`, `CLAUDE.md`, and example
+configs. It never overwrites an existing project. It then executes the base
+image's `/start.sh`, so the Pod remains available after commands or training
+finish. Interactive shells that start in `/workspace` or `/root` move to the
+selected project.
 
 `/opt/nanogpt` stays as the clean image reference. User edits belong in
-`/workspace/nanogpt`.
+`/workspace/nanogpt` or in a separately selected compatible fork.
 
 ## Build
 
@@ -59,6 +62,29 @@ dmpod-setup --skip-wandb --skip-hf --non-interactive
 `--hf-from-env` verifies `HF_TOKEN` without copying it to `/workspace`. Add
 `--save-hf-token` only when the token should remain available on the attached
 storage after the environment variable is gone.
+
+## Use a nanoGPT fork
+
+DMPod can use an existing nanoGPT-compatible Git checkout without injecting its
+tooling, agent guidance, or starter configuration into that repository:
+
+```bash
+git clone https://github.com/OWNER/REPOSITORY.git /workspace/my-nanogpt
+dmpod-setup --project-root /workspace/my-nanogpt
+```
+
+The selected path is saved in `/workspace/.dmpod/config.toml`. DMPod commands,
+the container entrypoint, and later interactive shells use it automatically.
+The repository must retain nanoGPT-compatible `model.py` and `train.py` files;
+DMPod continues to own run manifests, datasets, checkpoints, and reports under
+`/workspace`, independently of the checkout.
+
+To skip creation of the default starter checkout, set
+`DMPOD_PROJECT_ROOT=/workspace/my-nanogpt` in the Pod template before its first
+start. If that directory does not exist yet, the container starts in
+`/workspace` so the repository can be cloned there. Machine-level Codex and
+Claude guidance remains active, while project-specific `AGENTS.md` and
+`CLAUDE.md` files remain under the repository owner's control.
 
 If a W&B key is entered interactively, setup can save it at
 `/workspace/.dmpod/secrets/wandb.key` with mode `0600`. Environment variable
