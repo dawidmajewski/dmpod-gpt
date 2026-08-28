@@ -68,6 +68,13 @@ COPY scripts/container-entrypoint.sh /usr/local/bin/dmpod-entrypoint
 RUN test -n "${DMPOD_VERSION}" && \
     test "$(tr -d '[:space:]' < /opt/dmpod/VERSION)" = "${DMPOD_VERSION}" && \
     chmod 0755 /usr/local/bin/dmpod-entrypoint /opt/dmpod/bin/* && \
+    install -D -m 0644 /opt/dmpod/agent-guidance/AGENTS.md /root/.codex/AGENTS.md && \
+    install -D -m 0644 /opt/dmpod/agent-guidance/AGENTS.md /etc/claude-code/CLAUDE.md && \
+    mkdir -p /etc/codex/skills /root/.claude/skills && \
+    ln -sfn /opt/dmpod/agent-skills/dmpod-huggingface-publish \
+      /etc/codex/skills/dmpod-huggingface-publish && \
+    ln -sfn /opt/dmpod/agent-skills/dmpod-huggingface-publish \
+      /root/.claude/skills/dmpod-huggingface-publish && \
     git -C /opt/nanogpt apply --check /opt/dmpod/patches/nanogpt-atomic-checkpoints.patch && \
     for command in /opt/dmpod/bin/*; do \
       ln -s "$command" "/usr/local/bin/$(basename "$command")"; \
@@ -92,7 +99,7 @@ COPY DMPOD_VERSION /tmp/dmpod-source/DMPOD_VERSION
 RUN cd /tmp/dmpod-source && python -m unittest discover -s tests -v && \
     DMPOD_WORKSPACE=/tmp/dmpod-smoke-workspace \
       dmpod-entrypoint /bin/bash -c \
-      'test -x /start.sh && test -d .git && test -f AGENTS.md && dmpod-setup --wandb-mode offline --skip-hf --non-interactive' && \
+      'test -x /start.sh && test -d .git && test -f AGENTS.md && test -f /root/.codex/AGENTS.md && test -f /etc/claude-code/CLAUDE.md && test -f /etc/codex/skills/dmpod-huggingface-publish/SKILL.md && test -f /root/.claude/skills/dmpod-huggingface-publish/SKILL.md && dmpod-wandb-status --help >/dev/null && dmpod-setup --wandb-mode offline --skip-hf --non-interactive' && \
     rm -rf /tmp/dmpod-source /tmp/dmpod-smoke-workspace
 
 FROM runtime AS final

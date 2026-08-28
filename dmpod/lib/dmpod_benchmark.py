@@ -226,9 +226,9 @@ class TextTokenizer:
             from tokenizers import Tokenizer
 
             tokenizer = Tokenizer.from_file(str(path))
-            self._encode = lambda text: tokenizer.encode(
-                text, add_special_tokens=False
-            ).ids
+            self._encode = lambda text: (
+                tokenizer.encode(text, add_special_tokens=False).ids
+            )
 
     def encode(self, text: str) -> list[int]:
         return list(self._encode(text))
@@ -276,7 +276,9 @@ class NanoGPTBackend:
 
         source = self.run_dir / "sources" / "model.py"
         if not source.is_file():
-            raise FileNotFoundError(f"Run is missing the snapshotted model source: {source}")
+            raise FileNotFoundError(
+                f"Run is missing the snapshotted model source: {source}"
+            )
         module_name = f"dmpod_benchmark_model_{id(self)}"
         spec = importlib.util.spec_from_file_location(module_name, source)
         if spec is None or spec.loader is None:
@@ -444,7 +446,9 @@ def make_harness_model(backend: NanoGPTBackend):
             return results
 
         def loglikelihood_rolling(self, requests) -> list[float]:
-            raise NotImplementedError("The selected benchmark requires rolling likelihood")
+            raise NotImplementedError(
+                "The selected benchmark requires rolling likelihood"
+            )
 
         def generate_until(self, requests) -> list[str]:
             raise NotImplementedError("The selected benchmark requires generation")
@@ -631,7 +635,7 @@ def evaluate_polish(
         "name": benchmark.name,
         "language": benchmark.language,
         "protocol": {
-            "implementation": "DMPod zero-shot classification",
+            "implementation": "nanoGPT zero-shot classification",
             "dataset": benchmark.dataset,
             "revision": benchmark.revision,
             "split": benchmark.split,

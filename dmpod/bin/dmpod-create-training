@@ -35,6 +35,7 @@ from dmpod_profile import (  # noqa: E402
     write_train_eval_offsets,
     write_val_eval_offsets,
 )
+from dmpod_wandb import configure_run  # noqa: E402
 
 
 ARCHITECTURE_KEYS = ("n_layer", "n_head", "n_embd", "block_size", "bias")
@@ -81,6 +82,18 @@ def create_profile_run(args: argparse.Namespace) -> None:
         seed=args.seed,
         dataset_validation=dataset_validation,
     )
+    resolved["profile"] = profile["name"]
+    configure_run(
+        resolved,
+        revision=args.experiment_revision,
+        change=args.change,
+        hypothesis=args.hypothesis,
+        project=args.wandb_project,
+        group=args.wandb_group,
+        run_name=args.wandb_run_name,
+        job_type=args.wandb_job_type,
+        tags=args.wandb_tag,
+    )
     generated_name = canonical_run_name(resolved)
     name = args.name or generated_name
     require_name(name, "run name")
@@ -107,6 +120,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
         tokenizer_copy = staging / "sources" / "tokenizer.json"
         model_copy = staging / "sources" / "model.py"
         trainer_copy = staging / "sources" / "trainer.py"
+        wandb_contract_copy = staging / "sources" / "dmpod_wandb.py"
         shutil.copy2(profile_path, profile_copy)
         atomic_json(dataset_copy, dataset_manifest)
         atomic_json(validation_copy, dataset_validation)
@@ -116,8 +130,11 @@ def create_profile_run(args: argparse.Namespace) -> None:
             Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
         )
+        shutil.copy2(
+            Path(__file__).resolve().parents[1] / "lib" / "dmpod_wandb.py",
+            wandb_contract_copy,
+        )
 
-        resolved["profile"] = profile["name"]
         resolved["name"] = name
         resolved["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         resolved["data"]["path"] = str(dataset_dir)
@@ -142,6 +159,7 @@ def create_profile_run(args: argparse.Namespace) -> None:
             "tokenizer": tokenizer_copy,
             "model_source": model_copy,
             "trainer_source": trainer_copy,
+            "wandb_contract": wandb_contract_copy,
             "config": config_path,
             "train_eval_offsets": staging
             / resolved["evaluation"]["train_eval_offsets"]["path"],
@@ -299,12 +317,16 @@ def create_config_run(args: argparse.Namespace) -> None:
     source: dict[str, object] = {"type": args.source}
     if args.source == "scratch":
         if args.model_id or args.revision or args.checkpoint:
-            raise ValueError("scratch source does not accept model or checkpoint arguments")
+            raise ValueError(
+                "scratch source does not accept model or checkpoint arguments"
+            )
         tokenizer = dataset_manifest["tokenizer"]
         vocab_size = int(tokenizer.get("model_vocab_size", tokenizer["vocab_size"]))
     elif args.source == "hf":
         if not args.model_id or args.checkpoint:
-            raise ValueError("hf source requires --model-id and does not accept --checkpoint")
+            raise ValueError(
+                "hf source requires --model-id and does not accept --checkpoint"
+            )
         reference, local, resolved_revision, content_hash, vocab_size = validate_hf(
             args.model_id,
             args.revision,
@@ -331,14 +353,19 @@ def create_config_run(args: argparse.Namespace) -> None:
         if checkpoint_tokenizer.get("sha256") != dataset_manifest["tokenizer"].get(
             "sha256"
         ):
-            raise ValueError("Checkpoint tokenizer does not match the dataset tokenizer")
+            raise ValueError(
+                "Checkpoint tokenizer does not match the dataset tokenizer"
+            )
         source.update(
             checkpoint=str(checkpoint),
             checkpoint_sha256=file_sha256(checkpoint),
             vocab_size=vocab_size,
         )
 
-    if args.source == "hf" and dataset_manifest["tokenizer"].get("name") != "tiktoken:gpt2":
+    if (
+        args.source == "hf"
+        and dataset_manifest["tokenizer"].get("name") != "tiktoken:gpt2"
+    ):
         raise ValueError("GPT-2 Hugging Face initialization requires a GPT-2 tokenizer")
 
     profile = profile_from_configs(
@@ -348,7 +375,6 @@ def create_config_run(args: argparse.Namespace) -> None:
         dataset_dir=dataset_dir,
         dataset_name=dataset_name,
         vocab_size=vocab_size,
-        wandb_project=str(environment["wandb"]["project"]),
     )
     _, dataset_validation = validate_dataset_manifest(dataset_manifest_path, profile)
     tokenizer_source = Path(dataset_validation["tokenizer"]["path"])
@@ -361,6 +387,17 @@ def create_config_run(args: argparse.Namespace) -> None:
     resolved["profile"] = "config"
     resolved["name"] = args.name
     resolved["created_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    configure_run(
+        resolved,
+        revision=args.experiment_revision,
+        change=args.change,
+        hypothesis=args.hypothesis,
+        project=args.wandb_project,
+        group=args.wandb_group,
+        run_name=args.wandb_run_name,
+        job_type=args.wandb_job_type,
+        tags=args.wandb_tag,
+    )
     resolved["wandb"]["run_id"] = uuid.uuid4().hex[:8]
 
     runs_root = Path(environment["runs_root"])
@@ -386,6 +423,7 @@ def create_config_run(args: argparse.Namespace) -> None:
         tokenizer_copy = staging / "sources" / "tokenizer.json"
         model_copy = staging / "sources" / "model.py"
         trainer_copy = staging / "sources" / "trainer.py"
+        wandb_contract_copy = staging / "sources" / "dmpod_wandb.py"
         atomic_json(profile_copy, profile)
         shutil.copy2(model_path, model_config_copy)
         shutil.copy2(training_path, training_config_copy)
@@ -396,6 +434,10 @@ def create_config_run(args: argparse.Namespace) -> None:
         shutil.copy2(
             Path(__file__).resolve().parents[1] / "lib" / "trainer.py",
             trainer_copy,
+        )
+        shutil.copy2(
+            Path(__file__).resolve().parents[1] / "lib" / "dmpod_wandb.py",
+            wandb_contract_copy,
         )
         resolved["evaluation"]["train_eval_offsets"] = write_train_eval_offsets(
             staging, resolved
@@ -416,6 +458,7 @@ def create_config_run(args: argparse.Namespace) -> None:
             "tokenizer": tokenizer_copy,
             "model_source": model_copy,
             "trainer_source": trainer_copy,
+            "wandb_contract": wandb_contract_copy,
             "config": config_path,
             "train_eval_offsets": staging
             / resolved["evaluation"]["train_eval_offsets"]["path"],
@@ -452,7 +495,9 @@ def create_config_run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create an immutable DMPod training run.")
+    parser = argparse.ArgumentParser(
+        description="Create an immutable DMPod training run."
+    )
     parser.add_argument("name", nargs="?")
     parser.add_argument("--profile")
     parser.add_argument("--max-lr", type=float)
@@ -464,6 +509,14 @@ def main() -> None:
     parser.add_argument("--model-id")
     parser.add_argument("--revision")
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--experiment-revision", required=True)
+    parser.add_argument("--change", required=True)
+    parser.add_argument("--hypothesis", required=True)
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-group")
+    parser.add_argument("--wandb-run-name")
+    parser.add_argument("--wandb-job-type")
+    parser.add_argument("--wandb-tag", action="append", default=[])
     args = parser.parse_args()
 
     if args.profile:
@@ -478,7 +531,9 @@ def main() -> None:
                 args.checkpoint,
             )
         ):
-            raise ValueError("--profile cannot be combined with config-based run arguments")
+            raise ValueError(
+                "--profile cannot be combined with config-based run arguments"
+            )
         create_profile_run(args)
         return
 

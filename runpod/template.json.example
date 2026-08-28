@@ -9,12 +9,12 @@
     "TORCH_HOME": "/workspace/cache/torch",
     "WANDB_DIR": "/workspace/logs/wandb"
   },
-  "imageName": "dawidmkrk/dmpod-gpt:v1.1.0",
+  "imageName": "dawidmkrk/dmpod-gpt:v1.2.0",
   "isPublic": false,
   "isServerless": false,
   "name": "dmpod-gpt-v1",
   "ports": ["8888/http", "22/tcp"],
-  "readme": "Persistent nanoGPT environment. Attach storage at /workspace, run dmpod-setup, then prepare data and create a named training run. Codex and Claude Code are installed but authentication is user-managed.",
+  "readme": "Persistent nanoGPT environment on Runpod. Attach storage at /workspace, run dmpod-setup, verify with dmpod-wandb-status, then prepare data and create a named training run. Codex and Claude Code include DMPod training and benchmark context; their authentication is user-managed.",
   "volumeInGb": 50,
   "volumeMountPath": "/workspace"
 }

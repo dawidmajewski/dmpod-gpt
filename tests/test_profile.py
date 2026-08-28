@@ -11,6 +11,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "dmpod" / "lib"))
 
 from dmpod_profile import load_profile, parameter_counts, validate_profile
+from dmpod_wandb import SUMMARY_KEYS, TRAIN_METRICS, configure_run
 from trainer import Reporter, event_thresholds, learning_rate
 
 
@@ -122,6 +123,12 @@ class ProfileTests(unittest.TestCase):
                 "version": "1",
             },
         }
+        configure_run(
+            profile,
+            revision="r001",
+            change="reporter-contract",
+            hypothesis="The reporter emits the canonical metric contract.",
+        )
         profile["wandb"]["run_id"] = "test1234"
 
         class FakeRun:
@@ -162,7 +169,13 @@ class ProfileTests(unittest.TestCase):
 
         fake_run = FakeRun()
         fake_wandb = types.ModuleType("wandb")
-        fake_wandb.init = lambda **_kwargs: fake_run
+        init_kwargs = {}
+
+        def fake_init(**kwargs):
+            init_kwargs.update(kwargs)
+            return fake_run
+
+        fake_wandb.init = fake_init
         fake_wandb.Artifact = FakeArtifact
         previous = sys.modules.get("wandb")
         sys.modules["wandb"] = fake_wandb
@@ -184,13 +197,15 @@ class ProfileTests(unittest.TestCase):
                     },
                     enabled=True,
                 )
-                reporter.log(
+                payload = {key: 0.0 for key in TRAIN_METRICS}
+                payload.update(
                     {
+                        "progress/update_step": 1,
                         "progress/tokens_seen": 8192,
                         "train/loss": 4.0,
-                    },
-                    "training",
+                    }
                 )
+                reporter.log(payload, "training")
                 checkpoint = run_dir / "checkpoint.pt"
                 checkpoint.write_bytes(b"checkpoint")
                 reporter.record_checkpoint(
@@ -209,11 +224,11 @@ class ProfileTests(unittest.TestCase):
                     (run_dir / "artifacts.json").read_text(encoding="utf-8")
                 )["checkpoints"]
                 self.assertEqual(len(artifact_records), 1)
-                self.assertEqual(
-                    artifact_records[0]["metadata"]["tokens_seen"], 16384
-                )
+                self.assertEqual(artifact_records[0]["metadata"]["tokens_seen"], 16384)
                 reporter.upload_recorded_checkpoint(checkpoint, ["final"])
-                reporter.summary({"final_val_loss": 3.9})
+                summary = {key: None for key in SUMMARY_KEYS}
+                summary["final_val_loss"] = 3.9
+                reporter.summary(summary)
                 reporter.finish()
                 self.assertTrue((run_dir / "metrics.jsonl").is_file())
                 self.assertTrue((run_dir / "wandb.json").is_file())
@@ -224,6 +239,13 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(fake_run.logged[0]["train/loss"], 4.0)
                 self.assertEqual(fake_run.artifacts[0][1], ["final"])
                 self.assertEqual(fake_run.summary["final_val_loss"], 3.9)
+                self.assertEqual(
+                    init_kwargs["name"], "r001-reporter-contract-s1337-lr0.001"
+                )
+                self.assertEqual(
+                    init_kwargs["notes"],
+                    "The reporter emits the canonical metric contract.",
+                )
         finally:
             if previous is None:
                 sys.modules.pop("wandb", None)

@@ -1,9 +1,10 @@
-Read and follow `AGENTS.md` in this directory before making changes or running training commands.
+@AGENTS.md
 
-Before starting, resuming, or restarting training, verify that W&B online
-logging is connected. If it is not connected or cannot be verified, do not run
-`dmpod-train` until the user explicitly confirms proceeding with local-only or
-offline logging.
+Before starting, resuming, or restarting training, run `dmpod-wandb-status`.
+Trust its effective DMPod configuration rather than checking only whether
+`WANDB_API_KEY` exists in the current process. If it does not report
+`W&B status: connected`, do not run `dmpod-train` until the user explicitly
+confirms proceeding with local-only or offline logging.
 
 After training succeeds, ask whether the user wants quality benchmarks. If the
 answer is yes, use `dmpod-benchmark NAME` and then refresh the exported reports.

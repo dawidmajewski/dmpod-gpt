@@ -18,6 +18,11 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+from dmpod_wandb import (
+    METRIC_DEFINITIONS,
+    validate_metric_payload,
+    validate_summary,
+)
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -69,10 +74,19 @@ def flatten_wandb_config(
     evaluation = config["evaluation"]
     logging = config["logging"]
     checkpoint = config["checkpoint"]
+    experiment = config["experiment"]
+    wandb = config["wandb"]
     values: dict[str, Any] = {
         "config_schema": config["schema"],
         "config_schema_version": config["schema_version"],
         "profile": config["profile"],
+        "experiment_schema": experiment["schema"],
+        "experiment_revision": experiment["revision"],
+        "experiment_change": experiment["change"],
+        "experiment_hypothesis": experiment["hypothesis"],
+        "wandb_project": wandb["project"],
+        "wandb_group": wandb["group"],
+        "wandb_job_type": wandb["job_type"],
         "task_type": config["task"]["type"],
         "framework": config["task"]["framework"],
         "objective": config["task"]["objective"],
@@ -149,9 +163,7 @@ def flatten_wandb_config(
         "train_eval_subset_tokens": evaluation["train_eval_subset_tokens"],
         "train_eval_offsets_sha256": evaluation["train_eval_offsets"]["sha256"],
         "loss_reduction": evaluation["loss_reduction"],
-        "train_log_interval_target_tokens": logging[
-            "train_log_interval_target_tokens"
-        ],
+        "train_log_interval_target_tokens": logging["train_log_interval_target_tokens"],
         "train_log_interval_steps": logging["train_log_interval_steps"],
         "aggregate_metrics_over_logging_window": logging[
             "aggregate_metrics_over_logging_window"
@@ -192,7 +204,8 @@ class Reporter:
             project=wandb_values["project"],
             group=wandb_values["group"],
             job_type=wandb_values["job_type"],
-            name=config["name"],
+            name=wandb_values["run_name"],
+            notes=config["experiment"]["hypothesis"],
             tags=wandb_values["tags"],
             config=wandb_config,
             dir=str(run_dir / "logs" / "wandb"),
@@ -208,16 +221,13 @@ class Reporter:
                 "mode": os.environ.get("WANDB_MODE", "online"),
             },
         )
-        self.run.define_metric("progress/tokens_seen")
-        for pattern in ("train/*", "eval/*", "perf/*", "amp/*"):
-            self.run.define_metric(pattern, step_metric="progress/tokens_seen")
-        self.run.define_metric(
-            "eval/val_loss",
-            step_metric="progress/tokens_seen",
-            summary="min",
-        )
+        for definition in METRIC_DEFINITIONS:
+            values = dict(definition)
+            name = values.pop("name")
+            self.run.define_metric(name, **values)
 
     def log(self, values: dict[str, Any], kind: str) -> None:
+        validate_metric_payload(values, kind)
         append_jsonl(
             self.metrics_path,
             {"timestamp": now(), "kind": kind, **values},
@@ -226,6 +236,7 @@ class Reporter:
             self.run.log(values)
 
     def summary(self, values: dict[str, Any]) -> None:
+        validate_summary(values)
         atomic_json(self.run_dir / "summary.json", values)
         if self.run is not None:
             for key, value in values.items():
@@ -564,10 +575,7 @@ def main() -> None:
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    if (
-        config.get("schema") != "dmpod.config"
-        or config.get("schema_version") != 1
-    ):
+    if config.get("schema") != "dmpod.config" or config.get("schema_version") != 1:
         raise ValueError(
             f"Unsupported training configuration: {run_dir / 'config.json'}"
         )
@@ -692,10 +700,14 @@ def main() -> None:
         initialization_state = torch.load(
             args.init_from, map_location=device, weights_only=False
         )
-        if initialization_state.get("schema") not in {
-            "dmpod.checkpoint",
-            "dmpod.initial-weights",
-        } or initialization_state.get("schema_version") != 1:
+        if (
+            initialization_state.get("schema")
+            not in {
+                "dmpod.checkpoint",
+                "dmpod.initial-weights",
+            }
+            or initialization_state.get("schema_version") != 1
+        ):
             raise ValueError(f"Unsupported initialization format: {args.init_from}")
         state = {
             key.removeprefix("_orig_mod."): value
@@ -901,9 +913,7 @@ def main() -> None:
         if master:
             if stop_request_path.is_file():
                 try:
-                    request = json.loads(
-                        stop_request_path.read_text(encoding="utf-8")
-                    )
+                    request = json.loads(stop_request_path.read_text(encoding="utf-8"))
                     state = json.loads(
                         (run_dir / "state.json").read_text(encoding="utf-8")
                     )
@@ -1091,18 +1101,12 @@ def main() -> None:
             final_train_loss, final_val_loss = evaluate({"final"})
         if master:
             stop_request_path.unlink(missing_ok=True)
-        if (
-            master
-            and reporter is not None
-            and checkpoint_config["log_wandb_artifacts"]
-        ):
+        if master and reporter is not None and checkpoint_config["log_wandb_artifacts"]:
             for alias in ("best-val", "final"):
                 checkpoint_path = run_dir / "checkpoints" / f"ckpt-{alias}.pt"
                 if checkpoint_path.is_file():
                     try:
-                        reporter.upload_recorded_checkpoint(
-                            checkpoint_path, [alias]
-                        )
+                        reporter.upload_recorded_checkpoint(checkpoint_path, [alias])
                     except Exception as error:
                         print(
                             f"Warning: W&B {alias} checkpoint upload failed: "

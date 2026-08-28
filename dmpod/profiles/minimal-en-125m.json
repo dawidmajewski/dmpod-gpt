@@ -6,6 +6,12 @@
     "framework": "nanoGPT",
     "objective": "next_token_cross_entropy"
   },
+  "publication": {
+    "languages": ["en"],
+    "datasets": ["SlayerLab/minimal-en-corpus-2.5b"],
+    "pipeline_tag": "text-generation",
+    "tags": ["pretraining", "english"]
+  },
   "model": {
     "n_layer": 16,
     "n_head": 12,
@@ -86,13 +92,8 @@
     "log_wandb_artifacts": true
   },
   "wandb": {
-    "project": "nanogpt-125m-minimal-en-2p5b",
-    "group": "lr-sweep-v1",
+    "project": "nanogpt-training-minimal-en-2p5b",
     "job_type": "pretrain",
-    "run_name_template": "lr-{max_lr}_seed-{seed}_btok-{effective_batch_tokens}",
-    "tags": ["nanogpt", "causal-lm", "125m", "vocab-12288", "corpus-2p5b", "4-pass", "lr-sweep"],
-    "primary_x_axis": "progress/tokens_seen",
-    "primary_comparison_metric": "final_val_loss",
-    "comparison_goal": "minimize"
+    "tags": ["nanogpt", "causal-lm", "125m", "vocab-12288", "corpus-2p5b", "4-pass", "lr-sweep"]
   }
 }

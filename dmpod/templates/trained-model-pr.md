@@ -8,6 +8,8 @@ $results_table
 
 ## Benchmarks
 
+$benchmark_note
+
 $benchmark_table
 
 $benchmark_links

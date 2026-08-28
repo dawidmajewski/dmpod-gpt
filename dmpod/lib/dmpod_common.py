@@ -189,3 +189,36 @@ def export_wandb_key(configured_source: str) -> str:
             os.environ["WANDB_API_KEY"] = key
             return configured_source
     return "none"
+
+
+def verify_wandb_key(key: str, timeout: int = 30) -> str:
+    if not key:
+        raise RuntimeError("W&B online mode requires a non-empty API key")
+    import wandb
+
+    try:
+        wandb.login(key=key, verify=True)
+        api = wandb.Api(api_key=key, timeout=timeout)
+        _ = api.viewer
+        entity = api.default_entity
+    except Exception as error:
+        raise RuntimeError("W&B online connection verification failed") from error
+    if not entity:
+        raise RuntimeError("W&B did not return a default entity for this account")
+    return str(entity)
+
+
+def verify_configured_wandb(
+    wandb_config: dict[str, Any], timeout: int = 30
+) -> tuple[str, str]:
+    if not wandb_config.get("enabled") or wandb_config.get("mode") == "disabled":
+        raise RuntimeError("W&B is disabled in DMPod configuration")
+    if wandb_config.get("mode") != "online":
+        raise RuntimeError("W&B is configured for offline logging")
+    source = export_wandb_key(str(wandb_config.get("key_source", "none")))
+    if source == "none":
+        raise RuntimeError(
+            "W&B online mode requires WANDB_API_KEY or a configured key file"
+        )
+    entity = verify_wandb_key(os.environ["WANDB_API_KEY"], timeout=timeout)
+    return source, entity

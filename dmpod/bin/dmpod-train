@@ -18,13 +18,13 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from dmpod_common import (  # noqa: E402
     atomic_json,
-    export_wandb_key,
     file_sha256,
     load_environment_config,
     load_json,
     nanogpt_root,
     require_name,
     tree_sha256,
+    verify_configured_wandb,
 )
 from dmpod_profile import validate_dataset_manifest  # noqa: E402
 from import_hf import import_hf_weights  # noqa: E402
@@ -225,11 +225,7 @@ def run_training(
     if wandb.get("entity"):
         os.environ["WANDB_ENTITY"] = wandb["entity"]
     if wandb["mode"] == "online":
-        key_source = export_wandb_key(wandb.get("key_source", "none"))
-        if key_source == "none":
-            raise RuntimeError(
-                "W&B online mode requires WANDB_API_KEY or a configured key file"
-            )
+        verify_configured_wandb(wandb)
     os.environ["DMPOD_WANDB_ENABLED"] = "1"
     runtime = runtime_metadata(manifest, gpu_count)
     atomic_json(run_dir / "runtime.json", runtime)

@@ -14,6 +14,7 @@ from dmpod_common import (  # noqa: E402
     load_environment_config,
     nanogpt_root,
     state_root,
+    verify_wandb_key,
     workspace_root,
     write_environment_config,
 )
@@ -25,24 +26,6 @@ def confirm(prompt: str, default: bool = False) -> bool:
     if not answer:
         return default
     return answer in {"y", "yes"}
-
-
-def verify_wandb_key(key: str) -> str:
-    import wandb
-
-    try:
-        wandb.login(key=key, verify=True)
-        api = wandb.Api(api_key=key, timeout=30)
-        api.viewer
-        entity = api.default_entity
-    except Exception as error:
-        raise SystemExit(
-            "W&B rejected the configured API key; create a current key at "
-            "https://wandb.ai/authorize and rerun dmpod-setup"
-        ) from error
-    if not entity:
-        raise SystemExit("W&B did not return a default entity for this account")
-    return str(entity)
 
 
 def configure_huggingface(token: str, save: bool) -> str:
@@ -97,7 +80,7 @@ def main() -> None:
     for path in (*paths.values(), root / "logs" / "wandb", state_root() / "secrets"):
         path.mkdir(parents=True, exist_ok=True)
 
-    project = args.wandb_project or existing_wandb.get("project", "dmpod-gpt")
+    project = args.wandb_project or existing_wandb.get("project", "nanogpt-training")
     entity = args.wandb_entity
     if entity is None:
         entity = existing_wandb.get("entity", "")
@@ -132,9 +115,7 @@ def main() -> None:
     elif mode in {"offline", "disabled"}:
         enabled = mode != "disabled"
     elif args.non_interactive:
-        raise SystemExit(
-            "Use --wandb-from-env or --skip-wandb in non-interactive mode"
-        )
+        raise SystemExit("Use --wandb-from-env or --skip-wandb in non-interactive mode")
     else:
         enabled = confirm("Configure Weights & Biases?", default=True)
         if enabled:
@@ -178,7 +159,14 @@ def main() -> None:
             )
         if not key_to_verify:
             raise SystemExit("W&B online mode requires a non-empty API key")
-        default_entity = verify_wandb_key(key_to_verify)
+        try:
+            default_entity = verify_wandb_key(key_to_verify)
+        except RuntimeError as error:
+            raise SystemExit(
+                "W&B rejected the configured API key or could not be reached; "
+                "check connectivity and the key at https://wandb.ai/authorize, "
+                "then rerun dmpod-setup"
+            ) from error
         if not entity:
             entity = default_entity
     if key_path_to_write is not None:

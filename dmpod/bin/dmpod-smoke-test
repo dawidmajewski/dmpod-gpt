@@ -9,40 +9,19 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from dmpod_common import atomic_json, export_wandb_key, load_environment_config  # noqa: E402
+from dmpod_common import (  # noqa: E402
+    atomic_json,
+    load_environment_config,
+    verify_configured_wandb,
+)
+from dmpod_wandb import (  # noqa: E402
+    EVAL_METRICS,
+    SUMMARY_KEYS,
+    TRAIN_METRICS,
+)
 
 
-RUN_NAME = "lr-0.001_seed-1337_btok-8192"
-TRAIN_METRICS = {
-    "progress/update_step",
-    "progress/tokens_seen",
-    "progress/data_pass_equivalent",
-    "train/loss",
-    "train/lr",
-    "train/grad_norm",
-    "train/grad_norm_max",
-    "train/clip_fraction",
-    "perf/tokens_per_sec",
-    "perf/step_time_ms",
-}
-EVAL_METRICS = {"eval/val_loss", "eval/train_loss"}
-SUMMARY_KEYS = {
-    "final_val_loss",
-    "min_val_loss",
-    "tokens_at_min_val_loss",
-    "final_train_eval_loss",
-    "final_val_perplexity",
-    "final_tokens_seen",
-    "final_data_pass_equivalent",
-    "completed_target_budget",
-    "optimizer_updates_completed",
-    "skipped_updates_total",
-    "wall_time_hours",
-    "mean_tokens_per_sec",
-    "peak_gpu_memory_allocated_gb",
-    "peak_gpu_memory_reserved_gb",
-    "stop_reason",
-}
+RUN_NAME = "r001-trainer-validation-s1337-lr0.001"
 
 
 def run(*command: str) -> None:
@@ -59,13 +38,22 @@ def main() -> None:
     wandb_config = environment["wandb"]
     if wandb_config["mode"] != "online" or not wandb_config["enabled"]:
         raise RuntimeError("The smoke test requires W&B online mode")
-    if export_wandb_key(wandb_config.get("key_source", "none")) == "none":
-        raise RuntimeError("The smoke test requires a configured W&B API key")
+    verify_configured_wandb(wandb_config)
     run_dir = Path(environment["runs_root"]) / RUN_NAME
     if run_dir.exists():
         raise FileExistsError(f"Smoke run already exists: {run_dir}")
     run("dmpod-prepare-data", "tinystories_smoke")
-    run("dmpod-create-training", "--profile", "smoke-tinystories")
+    run(
+        "dmpod-create-training",
+        "--profile",
+        "smoke-tinystories",
+        "--experiment-revision",
+        "r001",
+        "--change",
+        "trainer-validation",
+        "--hypothesis",
+        "The canonical trainer completes and records the full W&B contract.",
+    )
     run("dmpod-train", RUN_NAME)
     run("dmpod-export-run", RUN_NAME, "--format", "all")
 
@@ -90,9 +78,19 @@ def main() -> None:
         for checkpoint in artifacts["checkpoints"]
         for alias in checkpoint["aliases"]
     }
-    required_aliases = {"latest", "best-val", "pass-1", "pass-2", "pass-4", "pass-8", "final"}
+    required_aliases = {
+        "latest",
+        "best-val",
+        "pass-1",
+        "pass-2",
+        "pass-4",
+        "pass-8",
+        "final",
+    }
     if not required_aliases <= aliases:
-        raise RuntimeError(f"Missing checkpoint aliases: {sorted(required_aliases - aliases)}")
+        raise RuntimeError(
+            f"Missing checkpoint aliases: {sorted(required_aliases - aliases)}"
+        )
     for path in (
         run_dir / "checkpoints" / "ckpt-final.pt",
         run_dir / "reports" / "README.md",
@@ -108,7 +106,9 @@ def main() -> None:
     import wandb
 
     api = wandb.Api(timeout=60)
-    path = f"{wandb_record['entity']}/{wandb_record['project']}/{wandb_record['run_id']}"
+    path = (
+        f"{wandb_record['entity']}/{wandb_record['project']}/{wandb_record['run_id']}"
+    )
     remote = None
     for attempt in range(12):
         try:
@@ -122,7 +122,12 @@ def main() -> None:
     if remote is None or remote.state != "finished":
         raise RuntimeError("W&B run did not reach the finished state")
     remote_config = dict(remote.config)
-    for key in ("max_lr", "effective_batch_tokens", "seed", "actual_parameters_trainable"):
+    for key in (
+        "max_lr",
+        "effective_batch_tokens",
+        "seed",
+        "actual_parameters_trainable",
+    ):
         if key not in remote_config:
             raise RuntimeError(f"Missing W&B config field: {key}")
     remote_summary = dict(remote.summary)

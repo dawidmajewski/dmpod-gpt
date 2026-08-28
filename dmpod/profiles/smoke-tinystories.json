@@ -6,6 +6,12 @@
     "framework": "nanoGPT",
     "objective": "next_token_cross_entropy"
   },
+  "publication": {
+    "languages": ["en"],
+    "datasets": ["roneneldan/TinyStories"],
+    "pipeline_tag": "text-generation",
+    "tags": ["tinystories"]
+  },
   "model": {
     "n_layer": 4,
     "n_head": 4,
@@ -84,13 +90,8 @@
     "log_wandb_artifacts": true
   },
   "wandb": {
-    "project": "dmpod-gpt-smoke",
-    "group": "trainer-validation",
+    "project": "nanogpt-training-smoke",
     "job_type": "smoke-test",
-    "run_name_template": "lr-{max_lr}_seed-{seed}_btok-{effective_batch_tokens}",
-    "tags": ["nanogpt", "causal-lm", "smoke-test", "tinystories"],
-    "primary_x_axis": "progress/tokens_seen",
-    "primary_comparison_metric": "final_val_loss",
-    "comparison_goal": "minimize"
+    "tags": ["nanogpt", "causal-lm", "smoke-test", "tinystories"]
   }
 }

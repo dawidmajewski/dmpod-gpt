@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 from dmpod_common import atomic_json, file_sha256
+from dmpod_wandb import dataset_project, format_learning_rate
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -199,7 +200,6 @@ def profile_from_configs(
     dataset_dir: Path,
     dataset_name: str,
     vocab_size: int,
-    wandb_project: str,
 ) -> dict[str, Any]:
     model = {
         "n_layer": int(model_values["n_layer"]),
@@ -244,8 +244,7 @@ def profile_from_configs(
     decay_iters = int(training_values.get("lr_decay_iters", max_iters))
     if warmup_iters < 0 or decay_iters < 1 or warmup_iters > decay_iters:
         raise ValueError(
-            "LR schedule iterations must satisfy "
-            "0 <= warmup_iters <= lr_decay_iters"
+            "LR schedule iterations must satisfy 0 <= warmup_iters <= lr_decay_iters"
         )
     eval_iters = int(training_values.get("eval_iters", 200))
     eval_interval = int(training_values.get("eval_interval", 2000))
@@ -347,14 +346,9 @@ def profile_from_configs(
             "log_wandb_artifacts": True,
         },
         "wandb": {
-            "project": wandb_project,
-            "group": "training",
-            "job_type": "training",
-            "run_name_template": name,
+            "project": dataset_project(dataset_name),
+            "job_type": "pretrain",
             "tags": ["nanogpt", "causal-lm"],
-            "primary_x_axis": "progress/tokens_seen",
-            "primary_comparison_metric": "final_val_loss",
-            "comparison_goal": "minimize",
         },
     }
 
@@ -494,9 +488,9 @@ def validate_dataset_manifest(
         raise ValueError("Profile val token count does not match the dataset")
     validation["manifest_path"] = str(manifest_path)
     validation["manifest_sha256"] = file_sha256(manifest_path)
-    validation["dataset_size_gib"] = sum(
-        validation["files"][split]["bytes"] for split in ("train", "val")
-    ) / 1024**3
+    validation["dataset_size_gib"] = (
+        sum(validation["files"][split]["bytes"] for split in ("train", "val")) / 1024**3
+    )
     return manifest, validation
 
 
@@ -571,6 +565,13 @@ def resolve_profile(
 
 
 def canonical_run_name(resolved: dict[str, Any]) -> str:
+    experiment = resolved.get("experiment")
+    if experiment:
+        return (
+            f"{experiment['revision']}-{experiment['change']}-"
+            f"s{resolved['runtime']['seed']}-"
+            f"lr{format_learning_rate(resolved['optimizer']['max_lr'])}"
+        )
     values = {
         "max_lr": format(float(resolved["optimizer"]["max_lr"]), ".8g"),
         "seed": resolved["runtime"]["seed"],
@@ -607,9 +608,7 @@ def write_val_eval_offsets(run_dir: Path, resolved: dict[str, Any]) -> dict[str,
     evaluation = resolved["evaluation"]
     block_size = int(resolved["model"]["block_size"])
     val_tokens = int(resolved["data"]["val_tokens"])
-    requested_tokens = min(
-        int(evaluation["val_eval_subset_tokens"]), val_tokens - 1
-    )
+    requested_tokens = min(int(evaluation["val_eval_subset_tokens"]), val_tokens - 1)
     count = max(1, math.ceil(requested_tokens / block_size))
     rng = np.random.default_rng(int(resolved["runtime"]["eval_seed"]) + 1)
     offsets = rng.integers(0, val_tokens - block_size, size=count, dtype=np.int64)

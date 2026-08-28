@@ -12,6 +12,10 @@ small set of commands for persistent work under `/workspace`.
 - Official `karpathy/nanoGPT` cloned at the commit in `NANOGPT_REVISION`.
 - The complete `/opt/nanogpt/.git` directory for local history and comparisons.
 - Codex CLI `0.149.0` and Claude Code `2.1.240`, both checksum-verified.
+- Machine-level DMPod guidance and a shared Hugging Face publication skill for
+  Codex and Claude Code. Both agents are told that they are working on a RunPod
+  GPU Pod and that unqualified training and benchmark questions refer to the
+  local DMPod workflows.
 - `transformers`, `datasets`, `tiktoken`, W&B, and related pinned dependencies.
 - No datasets, model weights, checkpoints, credentials, or authentication state.
 
@@ -19,6 +23,8 @@ On first start the entrypoint copies `/opt/nanogpt`, including `.git`, to
 `/workspace/nanogpt` and adds `AGENTS.md`, `CLAUDE.md`, and example configs. It
 never overwrites an existing workspace. It then executes the base image's
 `/start.sh`, so the Pod remains available after commands or training finish.
+Interactive shells that start in `/workspace` or `/root` move to
+`/workspace/nanogpt`, where both agents can discover the project instructions.
 
 `/opt/nanogpt` stays as the clean image reference. User edits belong in
 `/workspace/nanogpt`.
@@ -26,7 +32,7 @@ never overwrites an existing workspace. It then executes the base image's
 ## Build
 
 ```bash
-IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.1.0 scripts/build.sh
+IMAGE_NAME=dawidmkrk/dmpod-gpt:v1.2.0 scripts/build.sh
 ```
 
 The build targets `linux/amd64`. Change the image tag whenever code,
@@ -60,6 +66,18 @@ If a W&B key is entered interactively, setup can save it at
 run manifest. Saving it on a Network Volume is explicit and optional.
 `dmpod-setup` also registers a verified online key with the standard W&B client,
 so `wandb` commands and agent tools use the same authenticated account.
+
+Check the effective configuration from any new shell or agent process with:
+
+```bash
+dmpod-wandb-status
+```
+
+This resolves `WANDB_API_KEY` or the workspace/ephemeral key selected by
+`dmpod-setup`, verifies the W&B account over the network, and never prints the
+key. It is also the check used before an online training process starts. The
+absence of `WANDB_API_KEY` from a later Codex or Claude process does not by
+itself mean that W&B needs to be configured again.
 
 Hugging Face login is optional and uses a hidden `HF_TOKEN` prompt. Tokens
 entered interactively, or passed with explicit `--save-hf-token`, are registered
@@ -128,7 +146,10 @@ All provenance and immutable file hashes are recorded in `manifest.json`:
 dmpod-create-training demo \
   --model-config configs/models/tiny-gpt.py \
   --training-config configs/training/shakespeare-char.py \
-  --source scratch
+  --source scratch \
+  --experiment-revision r001 \
+  --change baseline \
+  --hypothesis "Establish a reproducible baseline for later comparisons."
 
 dmpod-train demo
 ```
@@ -168,7 +189,10 @@ dmpod-create-training hf-demo \
   --training-config configs/training/shakespeare.py \
   --source hf \
   --model-id organization/model \
-  --revision COMMIT_SHA
+  --revision COMMIT_SHA \
+  --experiment-revision r002 \
+  --change hf-initialization \
+  --hypothesis "Pinned pretrained initialization improves validation loss."
 ```
 
 Initialize from a trusted DMPod checkpoint already on the volume:
@@ -178,7 +202,10 @@ dmpod-create-training continued \
   --model-config configs/models/gpt2-124m.py \
   --training-config configs/training/shakespeare.py \
   --source checkpoint \
-  --checkpoint /workspace/models/previous/ckpt.pt
+  --checkpoint /workspace/models/previous/ckpt.pt \
+  --experiment-revision r003 \
+  --change continued-pretraining \
+  --hypothesis "Continued pretraining improves validation loss without instability."
 ```
 
 Changing LR, scheduling, batch size, or evaluation settings only requires a
@@ -195,8 +222,11 @@ The canonical minimal-en profile uses 16 layers, 12 heads, width 768, context
 parameters. Create the first LR candidate with:
 
 ```bash
-dmpod-create-training --profile minimal-en-125m --max-lr 6e-4
-dmpod-train lr-0.0006_seed-1337_btok-262144 --tmux
+dmpod-create-training --profile minimal-en-125m --max-lr 6e-4 \
+  --experiment-revision r001 \
+  --change baseline \
+  --hypothesis "Establish the canonical 125M baseline."
+dmpod-train r001-baseline-s1337-lr0.0006 --tmux
 ```
 
 Profiles require a complete `dataset.json` next to `train.bin`, `val.bin`,
@@ -205,16 +235,25 @@ scans the binaries once, verifies SHA-256, token counts, tokenizer provenance,
 and that every token ID is below the configured vocabulary size.
 
 W&B online mode is the default. A run fails before using the GPU if the
-key is unavailable. Explicit offline mode remains available through
+key is unavailable or W&B cannot be reached. Explicit offline mode remains available through
 `dmpod-setup --wandb-mode offline`; local `metrics.jsonl`, `summary.json`, and
 checkpoint records are always written. Local periodic checkpoints are not
 uploaded to W&B. A completed online run uploads only the retained `best-val`
 and `final` checkpoint artifacts.
 
+Every new run uses the `nanogpt-training-v1` W&B contract. Its default group is
+`<revision>-<change>`, its run name is
+`<revision>-<change>-s<seed>-lr<max_lr>`, its primary x-axis is
+`progress/tokens_seen`, and its comparison metric is `eval/val_loss` minimized.
+Use `--experiment-revision` for the experiment sequence; `--revision` remains
+the immutable Hugging Face model revision. Project, group, run name, job type,
+and tags can be explicitly overridden with the corresponding `--wandb-*`
+options. All resolved values are frozen in `config.json`.
+
 Create the canonical W&B dashboard after setup:
 
 ```bash
-dmpod-wandb-dashboard --profile minimal-en-125m
+dmpod-wandb-dashboard RUN_NAME
 ```
 
 Generate a model card and pull-request body after training:
@@ -223,16 +262,51 @@ Generate a model card and pull-request body after training:
 dmpod-export-run RUN_NAME --format all
 ```
 
-The output is stored in `runs/RUN_NAME/reports/README.md`, `PR_BODY.md`, and
-`report-context.json`. The JSON context is the stable input for future HTML
-converters.
+The generated `README.md` is a Hugging Face-compatible, user-editable model
+card. It includes Hub YAML metadata, model and training configuration, complete
+summary statistics, benchmark tables, checkpoint hashes, native nanoGPT loading
+instructions, provenance, W&B links, and SVG curves generated from the local
+`metrics.jsonl` stream. The exporter does not invent a model-weights license:
+
+```bash
+dmpod-export-run RUN_NAME \
+  --model-id SlayerLab/MODEL_NAME \
+  --model-license apache-2.0
+```
+
+Profiles can provide default languages, datasets, pipeline tags, and tags.
+Override or supplement them with `--language`, `--dataset-id`, and `--tag`.
+If W&B screenshots or report images were downloaded separately, copy them into
+the report assets and embed them with:
+
+```bash
+dmpod-export-run RUN_NAME \
+  --wandb-media-dir /workspace/downloads/RUN_NAME-wandb
+```
+
+The output is stored in `runs/RUN_NAME/reports/README.md`, `PR_BODY.md`,
+`report-context.json`, `metrics.jsonl`, and `assets/`. The JSON context records
+the complete run configuration, state, summary, runtime, benchmarks, artifact
+records, metric-file hash, and generated media manifest. W&B scalar charts are
+generated locally because the charts displayed by the W&B UI are not ordinary
+run media files.
+
+Before public upload, review the intended-use and limitations prose, select the
+model license, verify that benchmarks were not run with `--limit`, and confirm
+that every linked W&B run and copied image is safe to publish. The
+`dmpod-huggingface-publish` agent skill supplies this checklist. Agents must not
+upload anything until the user explicitly approves the destination repository
+and file set.
 
 For a quick end-to-end validation using a pinned Hugging Face dataset:
 
 ```bash
 dmpod-prepare-data tinystories_smoke
-dmpod-create-training --profile smoke-tinystories
-dmpod-train lr-0.001_seed-1337_btok-8192 --tmux
+dmpod-create-training --profile smoke-tinystories \
+  --experiment-revision r001 \
+  --change trainer-validation \
+  --hypothesis "The trainer completes and records the full W&B contract."
+dmpod-train r001-trainer-validation-s1337-lr0.001 --tmux
 ```
 
 ## Benchmarks
@@ -271,6 +345,10 @@ fine-tuning. Results are written to `runs/RUN_NAME/benchmarks/results.json`.
 Run `dmpod-export-run RUN_NAME` afterward to add the table and benchmark links
 to the generated README and PR body. `--limit N` is available only for quick
 integration tests and should not be used for reported scores.
+
+Codex and Claude interpret an unqualified request for model benchmarks as the
+quality workflow through `dmpod-benchmark`. Use `run-benchmarks` explicitly for
+synthetic architecture throughput or GPU performance measurements.
 
 ## Storage
 
